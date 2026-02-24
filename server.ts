@@ -122,6 +122,24 @@ app.post("/iclock/cdata", (req, res) => {
     }
   } else if (table === "OPERLOG") {
     console.log(`[ZK] Operation Log from ${SN}: ${body}`);
+  } else if (table === "USERINFO") {
+    const lines = body.split("\n");
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const parts = line.split("\t");
+      // Format: PIN=1\tName=John\tPri=0\tPasswd=\tCard=\tGrp=1
+      const data: any = {};
+      parts.forEach(p => {
+        const [key, val] = p.split("=");
+        if (key) data[key.toLowerCase()] = val || "";
+      });
+
+      if (data.pin) {
+        db.prepare("INSERT OR REPLACE INTO users (pin, name, privilege, password, card) VALUES (?, ?, ?, ?, ?)")
+          .run(data.pin, data.name || "", parseInt(data.pri) || 0, data.passwd || "", data.card || "");
+      }
+    }
+    broadcast({ type: "users_updated" });
   }
 
   res.send("OK");
@@ -211,6 +229,21 @@ app.delete("/api/users/:pin", (req, res) => {
 app.get("/api/logs", (req, res) => {
   const logs = db.prepare("SELECT * FROM logs ORDER BY id DESC LIMIT 100").all();
   res.json(logs);
+});
+
+app.post("/api/sync-users", (req, res) => {
+  const devices = db.prepare("SELECT sn FROM devices").all() as any[];
+  if (devices.length === 0) {
+    return res.status(400).json({ error: "Nenhum dispositivo conectado para sincronizar." });
+  }
+
+  for (const dev of devices) {
+    // Command to device to upload all user info
+    const cmd = "DATA QUERY USERINFO";
+    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmd);
+  }
+
+  res.json({ success: true, message: "Comando de sincronização enviado para todos os dispositivos." });
 });
 
 // --- Vite Setup ---

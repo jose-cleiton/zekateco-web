@@ -101,7 +101,7 @@ export default function App() {
       const data = JSON.parse(event.data);
       if (data.type === "new_log") {
         setLogs(prev => [data.log, ...prev].slice(0, 100));
-      } else if (data.type === "device_update") {
+      } else if (data.type === "device_update" || data.type === "users_updated") {
         fetchData();
       }
     };
@@ -139,6 +139,23 @@ export default function App() {
       fetchData();
     } catch (error) {
       console.error("Error deleting user:", error);
+    }
+  };
+
+  const handleSyncUsers = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/sync-users", { method: "POST" });
+      if (res.ok) {
+        alert("Comando de sincronização enviado! Aguarde alguns segundos para os usuários aparecerem.");
+      } else {
+        const err = await res.json();
+        alert(err.error);
+      }
+    } catch (error) {
+      console.error("Error syncing users:", error);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -298,9 +315,19 @@ export default function App() {
                 <Users size={20} className="text-indigo-600" />
                 Usuários no Sistema
               </h2>
-              <span className="text-xs font-medium bg-slate-100 text-slate-600 px-2.5 py-1 rounded-lg">
-                {users.length} Total
-              </span>
+              <div className="flex items-center gap-2">
+                <button 
+                  onClick={handleSyncUsers}
+                  disabled={loading || devices.length === 0}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-xs font-bold hover:bg-slate-200 transition-all disabled:opacity-50"
+                >
+                  <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+                  Sincronizar do REP
+                </button>
+                <span className="text-xs font-medium bg-slate-100 text-slate-600 px-2.5 py-1 rounded-lg">
+                  {users.length} Total
+                </span>
+              </div>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-left border-collapse">
