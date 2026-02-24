@@ -1,0 +1,5 @@
+{
+  "name": "ZKTeco ADMS Server",
+  "description": "Servidor para gerenciamento de dispositivos ZKTeco via protocolo Push (ADMS) com CRUD de usuários e monitoramento em tempo real.",
+  "requestFramePermissions": []
+}
