@@ -139,7 +139,8 @@ app.post("/iclock/cdata", (req, res) => {
           .run(data.pin, data.name || "", parseInt(data.pri) || 0, data.passwd || "", data.card || "");
       }
     }
-    broadcast({ type: "users_updated" });
+  const users = db.prepare("SELECT * FROM users").all();
+  broadcast({ type: "users_updated", users });
   }
 
   res.send("OK");
