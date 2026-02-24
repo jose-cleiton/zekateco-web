@@ -69,7 +69,8 @@ function broadcast(data: any) {
 app.post("/iclock/registry", (req, res) => {
   const { SN } = req.query;
   console.log(`[ZK] Registry from SN: ${SN}`);
-  res.send("RegistryCode=1\nServerInternal=30\nPushVersion=3.0.1\n");
+  // Resposta padrão para modelos novos aceitarem o registro
+  res.send("RegistryCode=1\nServerInternal=30\nPushVersion=3.0.1\nMaxLogCount=10000\nMaxUserCount=1000\n");
 });
 
 // 1. Initialization and Polling
@@ -83,18 +84,12 @@ app.get("/iclock/cdata", (req, res) => {
     broadcast({ type: "device_update", sn: SN });
   }
 
-  // Return server settings to the device
-  res.send("GET OPTION FROM: " + SN + "\n" +
-           "Stamp=0\n" +
-           "OpStamp=0\n" +
-           "PhotoStamp=0\n" +
-           "ErrorDelay=30\n" +
-           "Delay=30\n" +
-           "TransTimes=00:00;14:00\n" +
-           "TransInterval=1\n" +
-           "TransFlag=1111000000\n" +
-           "Realtime=1\n" +
-           "Encrypt=0");
+  // Resposta simplificada e direta que o SenseFace prefere
+  if (options === "all") {
+    res.send("Stamp=1\nOpStamp=1\nPhotoStamp=1\nErrorDelay=30\nDelay=30\nTransTimes=00:00;14:00\nTransInterval=1\nTransFlag=1111000000\nRealtime=1\nEncrypt=0");
+  } else {
+    res.send("OK");
+  }
 });
 
 // 2. Data Upload (Logs, Users, etc.)
