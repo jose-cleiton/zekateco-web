@@ -230,9 +230,20 @@ async function startServer() {
   }
 
   const PORT = 3000;
-  server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
+    const os = await import('os');
+    server.listen(PORT, "0.0.0.0", () => {
+      const interfaces = os.networkInterfaces();
+      let ip = "localhost";
+      for (const name of Object.keys(interfaces)) {
+        for (const iface of interfaces[name] || []) {
+          if (iface.family === "IPv4" && !iface.internal) {
+            ip = iface.address;
+            break;
+          }
+        }
+      }
+      console.log(`Server running on http://${ip}:${PORT}`);
+    });
 }
 
 startServer();
