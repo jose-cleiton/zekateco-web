@@ -44,6 +44,7 @@ interface User {
   privilege: number;
   password?: string;
   card?: string;
+  photo_url?: string;
 }
 
 interface Log {
@@ -96,23 +97,48 @@ export default function App() {
   useEffect(() => {
     fetchData();
 
-    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const socket = new WebSocket(`${protocol}//${window.location.host}`);
-    ws.current = socket;
+    let stopped = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let knownBootId: string | null = null;
 
-    socket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      if (data.type === "new_log") {
-        setLogs(prev => [data.log, ...prev].slice(0, 100));
-      } else if (data.type === "device_update" || data.type === "users_updated") {
+    const connect = () => {
+      if (stopped) return;
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const socket = new WebSocket(`${protocol}//${window.location.host}`);
+      ws.current = socket;
+
+      socket.onopen = () => {
         fetchData();
-      }
+      };
+
+      socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === "hello") {
+          if (knownBootId === null) {
+            knownBootId = data.boot_id;
+          } else if (knownBootId !== data.boot_id) {
+            window.location.reload();
+          }
+        } else if (data.type === "new_log") {
+          setLogs((prev: Log[]) => [data.log, ...prev].slice(0, 100));
+        } else if (data.type === "device_update" || data.type === "users_updated") {
+          fetchData();
+        }
+      };
+
+      socket.onerror = () => {};
+      socket.onclose = () => {
+        if (stopped) return;
+        reconnectTimer = setTimeout(connect, 1500);
+      };
     };
 
-    socket.onerror = () => {};
+    connect();
 
     return () => {
-      socket.close();
+      stopped = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws.current?.close();
     };
   }, []);
 
@@ -345,6 +371,7 @@ export default function App() {
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-50/50">
+                    <th className="px-4 py-3 w-14"></th>
                     <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">PIN</th>
                     <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Nome</th>
                     <th className="px-6 py-3 text-xs font-semibold text-slate-500 uppercase tracking-wider">Privilégio</th>
@@ -355,6 +382,26 @@ export default function App() {
                 <tbody className="divide-y divide-slate-100">
                   {users.map(user => (
                     <tr key={user.pin} className="hover:bg-slate-50/50 transition-colors group">
+                      <td className="px-4 py-3">
+                        {user.photo_url ? (
+                          <img
+                            src={user.photo_url}
+                            alt={user.name}
+                            className="w-10 h-10 rounded-full object-cover ring-1 ring-slate-200"
+                            onError={(e: React.SyntheticEvent<HTMLImageElement>) => {
+                              const img = e.currentTarget;
+                              img.style.display = "none";
+                              if (img.nextElementSibling) (img.nextElementSibling as HTMLElement).style.display = "flex";
+                            }}
+                          />
+                        ) : null}
+                        <div
+                          className="w-10 h-10 rounded-full bg-slate-100 items-center justify-center text-slate-400"
+                          style={{ display: user.photo_url ? "none" : "flex" }}
+                        >
+                          <Users size={18} />
+                        </div>
+                      </td>
                       <td className="px-6 py-4 font-mono text-sm font-medium text-slate-600">{user.pin}</td>
                       <td className="px-6 py-4 font-semibold text-slate-800">{user.name}</td>
                       <td className="px-6 py-4">

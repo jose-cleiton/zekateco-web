@@ -4,6 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import Database from "better-sqlite3";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -25,7 +26,8 @@ db.exec(`
     privilege INTEGER DEFAULT 0,
     password TEXT,
     card TEXT,
-    group_id INTEGER DEFAULT 1
+    group_id INTEGER DEFAULT 1,
+    photo_path TEXT
   );
 
   CREATE TABLE IF NOT EXISTS logs (
@@ -46,12 +48,28 @@ db.exec(`
   );
 `);
 
+try {
+  db.exec("ALTER TABLE users ADD COLUMN photo_path TEXT");
+} catch (e: any) {
+  if (!String(e.message).includes("duplicate column")) throw e;
+}
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
+const BOOT_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
 app.use(express.text({ type: "*/*", limit: "10mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+const PHOTOS_DIR = path.join(__dirname, "photos");
+fs.mkdirSync(PHOTOS_DIR, { recursive: true });
+app.use("/photos", express.static(PHOTOS_DIR, { etag: true, maxAge: 0 }));
+
+wss.on("connection", (client) => {
+  client.send(JSON.stringify({ type: "hello", boot_id: BOOT_ID }));
+});
 
 function broadcast(data: any) {
   wss.clients.forEach((client) => {
@@ -61,7 +79,22 @@ function broadcast(data: any) {
   });
 }
 
-function updateDeviceSeen(sn: string, ip: string) {
+type DeviceSession = { socket: import("net").Socket; lastSeen: number };
+const deviceSessions = new Map<string, DeviceSession>();
+const IDLE_KILL_MS = 60_000; // close idle socket after 60s; forces REP to reopen and re-register
+
+const DEBUG_LOG = path.join(PHOTOS_DIR, "_debug.log");
+function debugDump(sn: string, label: string, body: string) {
+  try {
+    const stat = fs.existsSync(DEBUG_LOG) ? fs.statSync(DEBUG_LOG) : null;
+    if (stat && stat.size > 1_000_000) fs.truncateSync(DEBUG_LOG, 0);
+    // First 400 chars + size — enough to identify format without dumping base64.
+    const preview = body.length > 400 ? body.slice(0, 400) + `... [+${body.length - 400} bytes]` : body;
+    fs.appendFileSync(DEBUG_LOG, `\n--- ${new Date().toISOString()} SN=${sn} ${label} (${body.length} bytes) ---\n${preview}\n`);
+  } catch {}
+}
+
+function updateDeviceSeen(sn: string, ip: string, req?: express.Request) {
   const now = new Date().toISOString();
   const exists = db.prepare("SELECT sn FROM devices WHERE sn = ?").get(sn);
   if (exists) {
@@ -70,7 +103,44 @@ function updateDeviceSeen(sn: string, ip: string) {
     db.prepare("INSERT INTO devices (sn, alias, last_seen, ip) VALUES (?, ?, ?, ?)").run(sn, sn, now, ip);
   }
   broadcast({ type: "device_update", sn, last_seen: now, online: true });
+
+  if (req?.socket) {
+    const prev = deviceSessions.get(sn);
+    if (prev && prev.socket !== req.socket && !prev.socket.destroyed) {
+      // REP opened a new socket — drop the old zombie immediately.
+      prev.socket.destroy();
+    }
+    deviceSessions.set(sn, { socket: req.socket, lastSeen: Date.now() });
+    // HTTP keep-alive reuses the same socket across requests; only attach the
+    // close listener once per socket to avoid MaxListenersExceededWarning.
+    const sock = req.socket as any;
+    if (!sock._zkCloseAttached) {
+      sock._zkCloseAttached = true;
+      sock._zkSn = sn;
+      req.socket.once("close", () => {
+        const cur = deviceSessions.get(sock._zkSn);
+        if (cur?.socket === req.socket) deviceSessions.delete(sock._zkSn);
+      });
+    } else {
+      sock._zkSn = sn; // keep mapping fresh in case SN changes on reuse (rare)
+    }
+  } else {
+    const cur = deviceSessions.get(sn);
+    if (cur) cur.lastSeen = Date.now();
+  }
 }
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [sn, sess] of deviceSessions.entries()) {
+    if (now - sess.lastSeen > IDLE_KILL_MS && !sess.socket.destroyed) {
+      console.log(`[ZK] Idle reaper: closing socket for SN=${sn} (idle ${Math.round((now - sess.lastSeen) / 1000)}s)`);
+      sess.socket.destroy();
+      deviceSessions.delete(sn);
+      broadcast({ type: "device_update", sn, online: false });
+    }
+  }
+}, 15_000);
 
 function queueInitialCommands(sn: string) {
   const pending = db.prepare("SELECT COUNT(*) as c FROM commands WHERE sn = ? AND status = 0").get(sn) as any;
@@ -87,7 +157,7 @@ app.get("/iclock/ping", (req, res) => {
   const { SN } = req.query;
   if (SN) {
     const ip = (req.headers["x-forwarded-for"] as string) || req.ip || "";
-    updateDeviceSeen(SN as string, ip);
+    updateDeviceSeen(SN as string, ip, req);
   }
   res.type("text/plain").send("OK");
 });
@@ -102,7 +172,7 @@ app.post("/iclock/registry", (req, res) => {
 
   const ip = (req.headers["x-forwarded-for"] as string) || req.ip || "";
   const isNew = !db.prepare("SELECT sn FROM devices WHERE sn = ?").get(SN as string);
-  updateDeviceSeen(SN as string, ip);
+  updateDeviceSeen(SN as string, ip, req);
 
   if (isNew) {
     queueInitialCommands(SN as string);
@@ -117,7 +187,7 @@ app.post("/iclock/push", (req, res) => {
   console.log(`[ZK] push from SN: ${SN}`);
   if (SN) {
     const ip = (req.headers["x-forwarded-for"] as string) || req.ip || "";
-    updateDeviceSeen(SN as string, ip);
+    updateDeviceSeen(SN as string, ip, req);
   }
   res.type("text/plain").send("OK");
 });
@@ -130,11 +200,11 @@ app.get("/iclock/cdata", (req, res) => {
   if (SN) {
     const ip = (req.headers["x-forwarded-for"] as string) || req.ip || "";
     const device = db.prepare("SELECT sn FROM devices WHERE sn = ?").get(SN as string);
-    updateDeviceSeen(SN as string, ip);
+    updateDeviceSeen(SN as string, ip, req);
 
     if (device) {
       return res.type("text/plain").send(
-        `registry=ok\nRegistryCode=REG_${SN}_xyz789\nServerVersion=3.1.2\nPushProtVer=3.1.2\nRequestDelay=30\nTransTimes=00:00;14:00\nTransInterval=1\nRealtime=1`
+        `registry=ok\nRegistryCode=REG_${SN}_xyz789\nServerVersion=3.1.2\nPushProtVer=3.1.2\nRequestDelay=30\nTransTimes=00:00;14:00\nTransInterval=1\nRealtime=1\nBioPhotoFun=1\nBioDataFun=1\nEncryption=None`
       );
     }
   }
@@ -144,11 +214,14 @@ app.get("/iclock/cdata", (req, res) => {
 
 // 2. Data Upload — real-time logs and tabledata (POST cdata)
 app.post("/iclock/cdata", (req, res) => {
-  const { SN, table, Stamp } = req.query;
+  const { SN, table, tablename, Stamp } = req.query;
   const body = req.body as string;
-  console.log(`[ZK] cdata POST from SN: ${SN}, table: ${table}, stamp: ${Stamp}`);
+  // Photo uploads use ?tablename=userpic|biophoto; ATTLOG/rtlog use ?table=...
+  const t = (tablename as string) || (table as string);
+  console.log(`[ZK] cdata POST from SN: ${SN}, table: ${t}, stamp: ${Stamp}`);
+  if (SN) updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
 
-  if (table === "rtlog" || table === "ATTLOG") {
+  if (t === "rtlog" || t === "ATTLOG") {
     // rtlog format: "pin=1001 time=2024-04-25 10:30:45 ..."
     // ATTLOG format: "PIN\tTIME\tSTATUS\tVERIFY_TYPE"
     const lines = body.split("\n");
@@ -157,7 +230,7 @@ app.post("/iclock/cdata", (req, res) => {
 
       let pin: string, time: string, status: string, verifyType: string;
 
-      if (table === "rtlog") {
+      if (t === "rtlog") {
         const data: any = {};
         line.split(/\s(?=\w+=)/).forEach((part) => {
           const eq = part.indexOf("=");
@@ -173,13 +246,33 @@ app.post("/iclock/cdata", (req, res) => {
         .run(SN as string, pin, time, status || 0, verifyType || 0);
       broadcast({ type: "new_log", log: { id: info.lastInsertRowid, sn: SN, pin, time, status, verifyType } });
     }
-  } else if (table === "OPERLOG") {
-    console.log(`[ZK] OperLog from ${SN}: ${body}`);
-  } else if (table === "USERINFO") {
+  } else if (t === "OPERLOG") {
+    debugDump(SN as string, "cdata-OPERLOG", body);
+    console.log(`[ZK] OperLog from ${SN} (${body.length} bytes)`);
+    // Some firmwares send USERPIC/BIOPHOTO records inside OPERLOG batches.
+    const photoLines = body.split("\n").filter(l => /^(USERPIC|BIOPHOTO|userpic|biophoto)\b/.test(l.trim()));
+    if (photoLines.length > 0) {
+      const kind = /^biophoto|^BIOPHOTO/.test(photoLines[0].trim()) ? "biophoto" : "userpic";
+      parseAndSavePhotos(SN as string, photoLines.join("\n"), kind, `cdata-OPERLOG-${kind}`);
+    }
+  } else if (t === "USERINFO") {
     // Legacy: some devices still send USERINFO via cdata POST
     parseAndSaveUsers(SN as string, body, "cdata-USERINFO");
+  } else if (t === "userpic" || t === "biophoto") {
+    debugDump(SN as string, `cdata-${t}`, body);
+    const count = parseAndSavePhotos(SN as string, body, t, `cdata-${t}`);
+    return res.type("text/plain").send(`${t}=${count}\n`);
+  } else if (t === "tabledata" || /^(biophoto|userpic)\b/.test(body.trimStart())) {
+    // Push automático após cadastro: device manda `?table=tabledata` com
+    // body começando em `biophoto<TAB>pin=...<TAB>content=<base64>`. Detectado
+    // tanto pelo URL quanto pelo prefixo do corpo (alguns firmwares variam).
+    const kind = /^biophoto/i.test(body.trimStart()) ? "biophoto" : "userpic";
+    debugDump(SN as string, `cdata-tabledata-${kind}`, body);
+    const count = parseAndSavePhotos(SN as string, body, kind, `cdata-tabledata-${kind}`);
+    return res.type("text/plain").send(`${kind}=${count}\n`);
   } else {
-    console.log(`[ZK] cdata POST unknown table: ${table}, body: ${body?.slice(0, 200)}`);
+    debugDump(SN as string, `cdata-unknown-${t}`, body);
+    console.log(`[ZK] cdata POST unknown table: ${t}, body: ${body?.slice(0, 200)}`);
   }
 
   res.type("text/plain").send("OK");
@@ -190,9 +283,14 @@ app.post("/iclock/querydata", (req, res) => {
   const { SN, tablename } = req.query;
   const body = req.body as string;
   console.log(`[ZK] querydata from SN: ${SN}, tablename: ${tablename}`);
+  if (SN) updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
+
+  debugDump(SN as string, `querydata-${tablename}`, body);
 
   if (tablename === "user") {
     parseAndSaveUsers(SN as string, body, "querydata-user");
+  } else if (tablename === "userpic" || tablename === "biophoto") {
+    parseAndSavePhotos(SN as string, body, tablename as string, `querydata-${tablename}`);
   } else if (tablename === "transaction") {
     const lines = body.split("\n");
     for (const line of lines) {
@@ -259,9 +357,63 @@ function parseAndSaveUsers(sn: string, body: string, source: string) {
   broadcast({ type: "users_updated", users });
 }
 
+function parseAndSavePhotos(sn: string, body: string, kind: string, source: string): number {
+  // Per Push Protocol §7.8/§7.10: each record is one logical line shaped like
+  //   "userpic pin=1\tfilename=1.jpg\tsize=22320\tcontent=<base64-jpeg>"
+  // The leading word is the kind; remaining fields are TAB-separated key=value.
+  // content= is base64 (its '=' padding breaks the space-regex split, so split by TAB first).
+  const lines = body.split("\n");
+  let saved = 0;
+  for (const raw of lines) {
+    const line = raw.trim().replace(/^(userpic|biophoto)\s+/, "");
+    if (!line) continue;
+
+    const data: Record<string, string> = {};
+    const parts = line.includes("\t") ? line.split("\t") : line.split(/\s(?=\w+=)/);
+    for (const p of parts) {
+      const eq = p.indexOf("=");
+      if (eq > -1) data[p.slice(0, eq).toLowerCase()] = p.slice(eq + 1);
+    }
+
+    const pin = data.pin;
+    const b64 = data.content;
+    if (!pin || !b64) continue;
+
+    let buf: Buffer;
+    try { buf = Buffer.from(b64, "base64"); } catch { continue; }
+    if (buf.length < 8) continue;
+
+    const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+    const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
+    if (!isJpeg && !isPng) {
+      // biophoto with type=9 is a face template, not a viewable image — skip.
+      console.log(`[ZK] ${source} pin=${pin}: not an image (likely template), skipping`);
+      continue;
+    }
+
+    const filename = `${pin}.${isPng ? "png" : "jpg"}`;
+    fs.writeFileSync(path.join(PHOTOS_DIR, filename), buf);
+    db.prepare("INSERT OR IGNORE INTO users (pin) VALUES (?)").run(pin);
+    db.prepare("UPDATE users SET photo_path = ? WHERE pin = ?").run(filename, pin);
+    saved++;
+  }
+  console.log(`[ZK] ${source}: saved ${saved} photos from SN=${sn} (body ${body.length} bytes, ${lines.length} lines)`);
+  if (saved === 0 && body.length > 0) {
+    // Dump raw lines (first 200 chars each) to debug log so we can see what the device actually sends.
+    const sample = lines.slice(0, 5).map(l => l.slice(0, 200)).join("\n  | ");
+    fs.appendFileSync(DEBUG_LOG, `\n[parseAndSavePhotos ${source}] 0 photos parsed. First lines:\n  | ${sample}\n`);
+  }
+  if (saved > 0) {
+    const users = db.prepare("SELECT * FROM users").all();
+    broadcast({ type: "users_updated", users });
+  }
+  return saved;
+}
+
 // 3. Command Polling
 app.get("/iclock/getrequest", (req, res) => {
   const { SN } = req.query;
+  if (SN) updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
 
   const command = db.prepare("SELECT * FROM commands WHERE sn = ? AND status = 0 ORDER BY id ASC LIMIT 1")
     .get(SN as string) as any;
@@ -279,6 +431,7 @@ app.post("/iclock/devicecmd", (req, res) => {
   const { SN } = req.query;
   const body = req.body as string;
   console.log(`[ZK] devicecmd from SN: ${SN}, body: ${body}`);
+  if (SN) updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
 
   const match = body.match(/ID=(\d+)&Return=(-?\d+)/);
   if (match) {
@@ -310,8 +463,16 @@ app.get("/api/devices", (_req, res) => {
 });
 
 app.get("/api/users", (_req, res) => {
-  const users = db.prepare("SELECT * FROM users").all();
-  res.json(users);
+  const users = db.prepare("SELECT * FROM users").all() as any[];
+  res.json(users.map(u => {
+    if (!u.photo_path) return u;
+    try {
+      const v = Math.floor(fs.statSync(path.join(PHOTOS_DIR, u.photo_path)).mtimeMs);
+      return { ...u, photo_url: `/photos/${u.photo_path}?v=${v}` };
+    } catch {
+      return { ...u, photo_path: null };
+    }
+  }));
 });
 
 app.post("/api/users", express.json(), (req, res) => {
