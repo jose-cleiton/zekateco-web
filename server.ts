@@ -169,9 +169,9 @@ app.post("/iclock/cdata", (req, res) => {
       }
 
       if (!pin) continue;
-      db.prepare("INSERT INTO logs (sn, pin, time, status, verify_type) VALUES (?, ?, ?, ?, ?)")
+      const info = db.prepare("INSERT INTO logs (sn, pin, time, status, verify_type) VALUES (?, ?, ?, ?, ?)")
         .run(SN as string, pin, time, status || 0, verifyType || 0);
-      broadcast({ type: "new_log", log: { sn: SN, pin, time, status, verifyType } });
+      broadcast({ type: "new_log", log: { id: info.lastInsertRowid, sn: SN, pin, time, status, verifyType } });
     }
   } else if (table === "OPERLOG") {
     console.log(`[ZK] OperLog from ${SN}: ${body}`);

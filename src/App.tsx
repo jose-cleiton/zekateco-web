@@ -388,11 +388,11 @@ export default function App() {
             <div className="max-h-[400px] overflow-y-auto">
               <div className="divide-y divide-slate-100">
                 {logs.map((log, idx) => (
-                  <motion.div 
+                  <motion.div
+                    key={log.id ?? `${log.pin}-${log.time}-${idx}`}
                     initial={{ opacity: 0, x: -10 }}
                     animate={{ opacity: 1, x: 0 }}
                     transition={{ delay: idx * 0.02 }}
-                    key={log.id} 
                     className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
                   >
                     <div className="flex items-center gap-4">
