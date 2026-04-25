@@ -35,6 +35,7 @@ interface Device {
   alias: string;
   last_seen: string;
   ip: string;
+  online: boolean;
 }
 
 interface User {
@@ -68,7 +69,8 @@ export default function App() {
     card: ""
   });
 
-  const [serverUrl, setServerUrl] = useState("");
+  const [serverUrl, setServerUrl] = useState(window.location.origin);
+  const [serverPort, setServerPort] = useState("");
 
   const ws = useRef<WebSocket | null>(null);
 
@@ -83,6 +85,7 @@ export default function App() {
       setDevices(await devRes.json());
       setUsers(await userRes.json());
       setLogs(await logRes.json());
+      fetch("/api/config").then(r => r.json()).then(cfg => setServerPort(String(cfg.port))).catch(() => {});
     } catch (error) {
       console.error("Error fetching data:", error);
     } finally {
@@ -93,11 +96,11 @@ export default function App() {
   useEffect(() => {
     fetchData();
 
-    // Setup WebSocket
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    ws.current = new WebSocket(`${protocol}//${window.location.host}`);
+    const socket = new WebSocket(`${protocol}//${window.location.host}`);
+    ws.current = socket;
 
-    ws.current.onmessage = (event) => {
+    socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === "new_log") {
         setLogs(prev => [data.log, ...prev].slice(0, 100));
@@ -106,8 +109,10 @@ export default function App() {
       }
     };
 
+    socket.onerror = () => {};
+
     return () => {
-      ws.current?.close();
+      socket.close();
     };
   }, []);
 
@@ -219,11 +224,11 @@ export default function App() {
               <div className="flex-1 md:flex-none bg-white p-3 rounded-xl border border-indigo-200 flex items-center justify-between gap-4">
                 <div>
                   <p className="text-[10px] font-bold text-slate-400 uppercase">Endereço do Servidor</p>
-                  <p className="text-sm font-mono font-bold text-indigo-600">{serverUrl.replace(/^https?:\/\//, '')}</p>
+                  <p className="text-sm font-mono font-bold text-indigo-600">{new URL(serverUrl).hostname}</p>
                 </div>
-                <button 
+                <button
                   onClick={() => {
-                    navigator.clipboard.writeText(serverUrl.replace(/^https?:\/\//, ''));
+                    navigator.clipboard.writeText(new URL(serverUrl).hostname);
                     alert("Copiado!");
                   }}
                   className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 transition-colors"
@@ -234,7 +239,7 @@ export default function App() {
 
               <div className="flex-1 md:flex-none bg-white p-3 rounded-xl border border-indigo-200">
                 <p className="text-[10px] font-bold text-slate-400 uppercase">Porta</p>
-                <p className="text-sm font-mono font-bold text-indigo-600">{serverUrl.startsWith('https') ? '443' : '80'}</p>
+                <p className="text-sm font-mono font-bold text-indigo-600">{serverPort || new URL(serverUrl).port || (serverUrl.startsWith('https') ? '443' : '80')}</p>
               </div>
             </div>
           </section>
@@ -266,12 +271,19 @@ export default function App() {
                       <p className="text-xs text-slate-500 font-mono">{dev.ip}</p>
                     </div>
                     <div className="flex flex-col items-end">
-                      <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
-                        <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
-                        Online
-                      </span>
+                      {dev.online ? (
+                        <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 bg-emerald-50 px-2 py-1 rounded-full">
+                          <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                          Online
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1.5 text-xs font-medium text-slate-400 bg-slate-100 px-2 py-1 rounded-full">
+                          <div className="w-1.5 h-1.5 bg-slate-400 rounded-full" />
+                          Offline
+                        </span>
+                      )}
                       <p className="text-[10px] text-slate-400 mt-1">
-                        Visto: {new Date(dev.last_seen).toLocaleTimeString()}
+                        Visto: {dev.last_seen ? new Date(dev.last_seen).toLocaleTimeString() : "-"}
                       </p>
                     </div>
                   </motion.div>
@@ -285,8 +297,8 @@ export default function App() {
               <Activity size={20} className="text-indigo-600" />
               Atividade Recente
             </h2>
-            <div className="h-48 w-full">
-              <ResponsiveContainer width="100%" height="100%">
+            <div className="h-48 w-full" style={{ minHeight: 192 }}>
+              <ResponsiveContainer width="100%" height={192}>
                 <AreaChart data={chartData}>
                   <defs>
                     <linearGradient id="colorVal" x1="0" y1="0" x2="0" y2="1">
