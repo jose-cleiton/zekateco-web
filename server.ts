@@ -5,6 +5,8 @@ import http from "http";
 import Database from "better-sqlite3";
 import path from "path";
 import fs from "fs";
+import multer from "multer";
+import sharp from "sharp";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,7 +29,8 @@ db.exec(`
     password TEXT,
     card TEXT,
     group_id INTEGER DEFAULT 1,
-    photo_path TEXT
+    photo_path TEXT,
+    photo_blob BLOB
   );
 
   CREATE TABLE IF NOT EXISTS logs (
@@ -53,6 +56,11 @@ try {
 } catch (e: any) {
   if (!String(e.message).includes("duplicate column")) throw e;
 }
+try {
+  db.exec("ALTER TABLE users ADD COLUMN photo_blob BLOB");
+} catch (e: any) {
+  if (!String(e.message).includes("duplicate column")) throw e;
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -60,8 +68,10 @@ const wss = new WebSocketServer({ server });
 
 const BOOT_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
-app.use(express.text({ type: "*/*", limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+// Body parser apenas para endpoints do REP (text/plain ou application/push).
+// Sem isso, multer não receberia multipart porque text() consome qualquer Content-Type.
+app.use("/iclock", express.text({ type: "*/*", limit: "10mb" }));
+app.use("/iclock", express.urlencoded({ extended: true }));
 
 const PHOTOS_DIR = path.join(__dirname, "photos");
 fs.mkdirSync(PHOTOS_DIR, { recursive: true });
@@ -409,7 +419,7 @@ function parseAndSavePhotos(sn: string, body: string, kind: string, source: stri
     if (!same) {
       fs.writeFileSync(fullPath, buf);
       db.prepare("INSERT OR IGNORE INTO users (pin) VALUES (?)").run(pin);
-      db.prepare("UPDATE users SET photo_path = ? WHERE pin = ?").run(filename, pin);
+      db.prepare("UPDATE users SET photo_path = ?, photo_blob = ? WHERE pin = ?").run(filename, buf, pin);
     }
     console.log(`[ZK]   pin=${pin} ${same ? "(unchanged)" : "saved"} ${buf.length}B → ${filename}`);
     saved++;
@@ -419,10 +429,53 @@ function parseAndSavePhotos(sn: string, body: string, kind: string, source: stri
     fs.appendFileSync(DEBUG_LOG, `\n[parseAndSavePhotos ${source}] 0 photos parsed. Body preview: ${body.slice(0, 400)}\n`);
   }
   if (saved > 0) {
-    const users = db.prepare("SELECT * FROM users").all();
+    const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all();
     broadcast({ type: "users_updated", users });
   }
   return saved;
+}
+
+// Resize/recompress to ≤20KB JPEG before sending to REP (Soltech-proven shape).
+async function optimizeForRep(input: Buffer): Promise<Buffer> {
+  const TARGET = 20 * 1024;
+  let q = 90;
+  let out = await sharp(input)
+    .resize(358, 441, { fit: "cover", position: sharp.strategy.attention })
+    .jpeg({ quality: q, chromaSubsampling: "4:4:4" })
+    .toBuffer();
+  while (out.length > TARGET && q > 10) {
+    q -= 5;
+    out = await sharp(input)
+      .resize(358, 441, { fit: "cover", position: sharp.strategy.attention })
+      .jpeg({ quality: q, chromaSubsampling: "4:4:4" })
+      .toBuffer();
+  }
+  return out;
+}
+
+function enqueuePhotoUpdate(pin: string, jpeg: Buffer) {
+  const b64 = jpeg.toString("base64");
+  // BIOPHOTO Type=9 = Visible Light Face template (facial recognition).
+  const cmdBio = `DATA UPDATE BIOPHOTO PIN=${pin}\tType=9\tNo=0\tIndex=0\tSize=${b64.length}\tContent=${b64}\tFormat=0`;
+  // userpic = avatar shown on REP display (PDF §10, p.8861).
+  const cmdPic = `DATA UPDATE userpic pin=${pin}\tsize=${b64.length}\tformat=0\tcontent=${b64}`;
+  const devices = db.prepare("SELECT sn FROM devices").all() as any[];
+  for (const dev of devices) {
+    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmdBio);
+    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmdPic);
+  }
+  console.log(`[ZK] photo update enqueued pin=${pin} size=${b64.length}B (biophoto+userpic) for ${devices.length} device(s)`);
+}
+
+function enqueuePhotoDelete(pin: string) {
+  const devices = db.prepare("SELECT sn FROM devices").all() as any[];
+  for (const dev of devices) {
+    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)")
+      .run(dev.sn, `DATA DELETE biophoto PIN=${pin}\tType=9`);
+    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)")
+      .run(dev.sn, `DATA DELETE userpic pin=${pin}`);
+  }
+  console.log(`[ZK] photo delete enqueued pin=${pin} for ${devices.length} device(s)`);
 }
 
 // 3. Command Polling
@@ -478,7 +531,7 @@ app.get("/api/devices", (_req, res) => {
 });
 
 app.get("/api/users", (_req, res) => {
-  const users = db.prepare("SELECT * FROM users").all() as any[];
+  const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all() as any[];
   res.json(users.map(u => {
     if (!u.photo_path) return u;
     try {
@@ -520,6 +573,42 @@ app.delete("/api/users/:pin", (req, res) => {
     db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmd);
   }
 
+  res.json({ success: true });
+});
+
+const photoUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+app.post("/api/users/:pin/photo", photoUpload.single("photo"), async (req, res) => {
+  try {
+    const { pin } = req.params;
+    if (!req.file) return res.status(400).json({ error: "Arquivo 'photo' obrigatório" });
+
+    const optimized = await optimizeForRep(req.file.buffer);
+    const filename = `${pin}.jpg`;
+
+    db.prepare("INSERT OR IGNORE INTO users (pin) VALUES (?)").run(pin);
+    db.prepare("UPDATE users SET photo_blob = ?, photo_path = ? WHERE pin = ?")
+      .run(optimized, filename, pin);
+    fs.writeFileSync(path.join(PHOTOS_DIR, filename), optimized);
+
+    enqueuePhotoUpdate(pin, optimized);
+
+    const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all();
+    broadcast({ type: "users_updated", users });
+    res.json({ success: true, size: optimized.length });
+  } catch (e: any) {
+    console.error("[ZK] photo upload error:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+app.delete("/api/users/:pin/photo", (req, res) => {
+  const { pin } = req.params;
+  db.prepare("UPDATE users SET photo_blob = NULL, photo_path = NULL WHERE pin = ?").run(pin);
+  try { fs.unlinkSync(path.join(PHOTOS_DIR, `${pin}.jpg`)); } catch {}
+  enqueuePhotoDelete(pin);
+  const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all();
+  broadcast({ type: "users_updated", users });
   res.json({ success: true });
 });
 

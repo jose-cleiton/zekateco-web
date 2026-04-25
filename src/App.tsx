@@ -1,12 +1,12 @@
 import React, { useState, useEffect, useRef } from "react";
-import { 
-  Users, 
-  Cpu, 
-  Activity, 
-  Plus, 
-  Trash2, 
-  RefreshCw, 
-  Clock, 
+import {
+  Users,
+  Cpu,
+  Activity,
+  Plus,
+  Trash2,
+  RefreshCw,
+  Clock,
   UserPlus,
   Shield,
   Smartphone,
@@ -15,7 +15,9 @@ import {
   AlertCircle,
   Globe,
   Copy,
-  Terminal
+  Terminal,
+  Camera,
+  Loader2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -72,6 +74,7 @@ export default function App() {
 
   const [serverUrl, setServerUrl] = useState(window.location.origin);
   const [serverPort, setServerPort] = useState("");
+  const [uploadingPin, setUploadingPin] = useState<string | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
 
@@ -170,6 +173,28 @@ export default function App() {
       fetchData();
     } catch (error) {
       console.error("Error deleting user:", error);
+    }
+  };
+
+  const handlePhotoUpload = async (pin: string, file: File) => {
+    if (!file.type.startsWith("image/")) {
+      alert("Selecione uma imagem.");
+      return;
+    }
+    setUploadingPin(pin);
+    try {
+      const fd = new FormData();
+      fd.append("photo", file);
+      const res = await fetch(`/api/users/${pin}/photo`, { method: "POST", body: fd });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || "Erro ao enviar foto");
+      }
+    } catch (e) {
+      alert("Falha de rede ao enviar foto");
+      console.error(e);
+    } finally {
+      setUploadingPin(null);
     }
   };
 
@@ -383,24 +408,48 @@ export default function App() {
                   {users.map(user => (
                     <tr key={user.pin} className="hover:bg-slate-50/50 transition-colors group">
                       <td className="px-4 py-3">
-                        {user.photo_url ? (
-                          <img
-                            src={user.photo_url}
-                            alt={user.name}
-                            className="w-10 h-10 rounded-full object-cover ring-1 ring-slate-200"
-                            onError={(e: React.SyntheticEvent<HTMLImageElement>) => {
-                              const img = e.currentTarget;
-                              img.style.display = "none";
-                              if (img.nextElementSibling) (img.nextElementSibling as HTMLElement).style.display = "flex";
+                        <label
+                          className="relative w-10 h-10 block cursor-pointer group/avatar"
+                          title="Clique para enviar uma foto e sincronizar com o REP"
+                        >
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            disabled={uploadingPin === user.pin}
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                              const file = e.target.files?.[0];
+                              if (file) handlePhotoUpload(user.pin, file);
+                              e.target.value = "";
                             }}
                           />
-                        ) : null}
-                        <div
-                          className="w-10 h-10 rounded-full bg-slate-100 items-center justify-center text-slate-400"
-                          style={{ display: user.photo_url ? "none" : "flex" }}
-                        >
-                          <Users size={18} />
-                        </div>
+                          {user.photo_url ? (
+                            <img
+                              src={user.photo_url}
+                              alt={user.name}
+                              className="w-10 h-10 rounded-full object-cover ring-1 ring-slate-200"
+                              onError={(e: React.SyntheticEvent<HTMLImageElement>) => {
+                                const img = e.currentTarget;
+                                img.style.display = "none";
+                                if (img.nextElementSibling) (img.nextElementSibling as HTMLElement).style.display = "flex";
+                              }}
+                            />
+                          ) : null}
+                          <div
+                            className="w-10 h-10 rounded-full bg-slate-100 items-center justify-center text-slate-400"
+                            style={{ display: user.photo_url ? "none" : "flex" }}
+                          >
+                            <Users size={18} />
+                          </div>
+                          <div className="absolute inset-0 rounded-full bg-slate-900/60 flex items-center justify-center text-white opacity-0 group-hover/avatar:opacity-100 transition-opacity">
+                            {uploadingPin === user.pin ? <Loader2 size={16} className="animate-spin" /> : <Camera size={16} />}
+                          </div>
+                          {uploadingPin === user.pin && (
+                            <div className="absolute inset-0 rounded-full bg-slate-900/60 flex items-center justify-center text-white">
+                              <Loader2 size={16} className="animate-spin" />
+                            </div>
+                          )}
+                        </label>
                       </td>
                       <td className="px-6 py-4 font-mono text-sm font-medium text-slate-600">{user.pin}</td>
                       <td className="px-6 py-4 font-semibold text-slate-800">{user.name}</td>
