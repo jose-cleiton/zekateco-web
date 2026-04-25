@@ -261,6 +261,7 @@ app.post("/iclock/cdata", (req, res) => {
   } else if (t === "userpic" || t === "biophoto") {
     debugDump(SN as string, `cdata-${t}`, body);
     const count = parseAndSavePhotos(SN as string, body, t, `cdata-${t}`);
+    res.set("Connection", "close");
     return res.type("text/plain").send(`${t}=${count}\n`);
   } else if (t === "tabledata" || /^(biophoto|userpic)\b/.test(body.trimStart())) {
     // Push automático após cadastro: device manda `?table=tabledata` com
@@ -269,6 +270,7 @@ app.post("/iclock/cdata", (req, res) => {
     const kind = /^biophoto/i.test(body.trimStart()) ? "biophoto" : "userpic";
     debugDump(SN as string, `cdata-tabledata-${kind}`, body);
     const count = parseAndSavePhotos(SN as string, body, kind, `cdata-tabledata-${kind}`);
+    res.set("Connection", "close");
     return res.type("text/plain").send(`${kind}=${count}\n`);
   } else {
     debugDump(SN as string, `cdata-unknown-${t}`, body);
@@ -282,10 +284,12 @@ app.post("/iclock/cdata", (req, res) => {
 app.post("/iclock/querydata", (req, res) => {
   const { SN, tablename } = req.query;
   const body = req.body as string;
-  console.log(`[ZK] querydata from SN: ${SN}, tablename: ${tablename}`);
+  const ct = req.headers["content-type"] || "";
+  const cl = req.headers["content-length"] || "";
+  console.log(`[ZK] querydata from SN: ${SN}, tablename: ${tablename}, url=${req.originalUrl}, CT=${ct}, CL=${cl}, bodyLen=${body?.length ?? 0}`);
   if (SN) updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
 
-  debugDump(SN as string, `querydata-${tablename}`, body);
+  debugDump(SN as string, `querydata-${tablename}`, `[CT=${ct}][CL=${cl}][URL=${req.originalUrl}]\n${body || "<empty>"}`);
 
   if (tablename === "user") {
     parseAndSaveUsers(SN as string, body, "querydata-user");
@@ -358,18 +362,19 @@ function parseAndSaveUsers(sn: string, body: string, source: string) {
 }
 
 function parseAndSavePhotos(sn: string, body: string, kind: string, source: string): number {
-  // Per Push Protocol §7.8/§7.10: each record is one logical line shaped like
-  //   "userpic pin=1\tfilename=1.jpg\tsize=22320\tcontent=<base64-jpeg>"
-  // The leading word is the kind; remaining fields are TAB-separated key=value.
-  // content= is base64 (its '=' padding breaks the space-regex split, so split by TAB first).
-  const lines = body.split("\n");
+  // Per Push Protocol §7.8/§7.10/§9.6.1, a record is shaped like:
+  //   "userpic\tpin=1\tfilename=1.jpg\tsize=22320\tcontent=<base64-jpeg>"
+  // OR (per §9.6.1 example) split across lines:
+  //   "biophoto pin=123\tfilename=123.jpg\ttype=9\tsize=95040\ncontent=AAAA..."
+  // We split on the prefix boundary (not on '\n') so multi-line records stay whole.
+  const records = body.split(/(?=^(?:userpic|biophoto)\s)/m).map(r => r.trim()).filter(Boolean);
   let saved = 0;
-  for (const raw of lines) {
-    const line = raw.trim().replace(/^(userpic|biophoto)\s+/, "");
-    if (!line) continue;
-
+  for (const rec of records) {
+    const stripped = rec.replace(/^(userpic|biophoto)\s+/, "");
+    // Fields may be TAB-separated and content= often follows a newline. Normalize
+    // both \n and \t into a single delimiter so split() yields all key=value pairs.
+    const parts = stripped.split(/[\t\n]+/);
     const data: Record<string, string> = {};
-    const parts = line.includes("\t") ? line.split("\t") : line.split(/\s(?=\w+=)/);
     for (const p of parts) {
       const eq = p.indexOf("=");
       if (eq > -1) data[p.slice(0, eq).toLowerCase()] = p.slice(eq + 1);
@@ -380,28 +385,38 @@ function parseAndSavePhotos(sn: string, body: string, kind: string, source: stri
     if (!pin || !b64) continue;
 
     let buf: Buffer;
-    try { buf = Buffer.from(b64, "base64"); } catch { continue; }
+    try { buf = Buffer.from(b64.replace(/\s+/g, ""), "base64"); } catch { continue; }
     if (buf.length < 8) continue;
 
     const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
     const isPng = buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
     if (!isJpeg && !isPng) {
-      // biophoto with type=9 is a face template, not a viewable image — skip.
+      // biophoto can carry binary face templates (Type=2) that aren't viewable images.
       console.log(`[ZK] ${source} pin=${pin}: not an image (likely template), skipping`);
       continue;
     }
 
     const filename = `${pin}.${isPng ? "png" : "jpg"}`;
-    fs.writeFileSync(path.join(PHOTOS_DIR, filename), buf);
-    db.prepare("INSERT OR IGNORE INTO users (pin) VALUES (?)").run(pin);
-    db.prepare("UPDATE users SET photo_path = ? WHERE pin = ?").run(filename, pin);
+    const fullPath = path.join(PHOTOS_DIR, filename);
+    // Skip writing if same bytes already on disk — avoids retry-loop log spam.
+    let same = false;
+    try {
+      if (fs.existsSync(fullPath)) {
+        const existing = fs.readFileSync(fullPath);
+        same = existing.length === buf.length && existing.equals(buf);
+      }
+    } catch {}
+    if (!same) {
+      fs.writeFileSync(fullPath, buf);
+      db.prepare("INSERT OR IGNORE INTO users (pin) VALUES (?)").run(pin);
+      db.prepare("UPDATE users SET photo_path = ? WHERE pin = ?").run(filename, pin);
+    }
+    console.log(`[ZK]   pin=${pin} ${same ? "(unchanged)" : "saved"} ${buf.length}B → ${filename}`);
     saved++;
   }
-  console.log(`[ZK] ${source}: saved ${saved} photos from SN=${sn} (body ${body.length} bytes, ${lines.length} lines)`);
+  console.log(`[ZK] ${source}: ${saved} photos from SN=${sn} (body ${body.length}B, ${records.length} records)`);
   if (saved === 0 && body.length > 0) {
-    // Dump raw lines (first 200 chars each) to debug log so we can see what the device actually sends.
-    const sample = lines.slice(0, 5).map(l => l.slice(0, 200)).join("\n  | ");
-    fs.appendFileSync(DEBUG_LOG, `\n[parseAndSavePhotos ${source}] 0 photos parsed. First lines:\n  | ${sample}\n`);
+    fs.appendFileSync(DEBUG_LOG, `\n[parseAndSavePhotos ${source}] 0 photos parsed. Body preview: ${body.slice(0, 400)}\n`);
   }
   if (saved > 0) {
     const users = db.prepare("SELECT * FROM users").all();
@@ -521,6 +536,8 @@ app.post("/api/sync-users", (_req, res) => {
 
   for (const dev of devices) {
     db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, "DATA QUERY tablename=user,fielddesc=*,filter=*");
+    // Note: this firmware (VDE...) doesn't support pull via DATA QUERY for biophoto/userpic
+    // (always responds count=0&packcnt=0). Photos arrive only via push when edited on device.
   }
 
   res.json({ success: true, message: "Comando de sincronização enviado para todos os dispositivos." });
