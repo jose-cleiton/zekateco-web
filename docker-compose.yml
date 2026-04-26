@@ -32,6 +32,13 @@ services:
       NODE_ENV: production
       # Gateway de comandos: backend chama Soltech via DNS docker antes de servir fila local.
       SOLTECH_GATEWAY_URL: http://ultraponto-api:8080
+      # S3 — fotos biométricas
+      S3_BUCKET: ${S3_BUCKET}
+      S3_PREFIX: ${S3_PREFIX:-zekateco-photos}
+      S3_PRESIGNED_TTL: ${S3_PRESIGNED_TTL:-3600}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     volumes:
       - photos_data:/app/photos
     depends_on:

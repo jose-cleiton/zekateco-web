@@ -10,6 +10,8 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import { prisma } from "./src/db.js";
 import type { PhotoOp, UserOp } from "@prisma/client";
+import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,6 +24,60 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 const BOOT_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+// --- S3 Setup ---
+const S3_BUCKET = process.env.S3_BUCKET || "";
+const S3_PREFIX = (process.env.S3_PREFIX || "zekateco-photos").replace(/\/$/, "");
+const PRESIGNED_TTL = parseInt(process.env.S3_PRESIGNED_TTL || "3600");
+
+let s3: S3Client | null = null;
+if (S3_BUCKET) {
+  s3 = new S3Client({
+    region: process.env.AWS_REGION || process.env.S3_REGION || "us-east-1",
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID || process.env.S3_ACCESS_KEY_ID || "",
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || process.env.S3_SECRET_ACCESS_KEY || "",
+    },
+  });
+  console.log(`[S3] Configurado: bucket=${S3_BUCKET} prefix=${S3_PREFIX}`);
+} else {
+  console.log("[S3] Não configurado — usando armazenamento local");
+}
+
+function s3Key(pin: string) {
+  return `${S3_PREFIX}/${pin}/face-photo.jpg`;
+}
+
+async function s3Upload(pin: string, buf: Buffer): Promise<void> {
+  await s3!.send(new PutObjectCommand({
+    Bucket: S3_BUCKET, Key: s3Key(pin), Body: buf, ContentType: "image/jpeg",
+  }));
+}
+
+async function s3Presign(pin: string): Promise<string> {
+  return getSignedUrl(s3!, new GetObjectCommand({ Bucket: S3_BUCKET, Key: s3Key(pin) }), { expiresIn: PRESIGNED_TTL });
+}
+
+async function s3PresignKey(key: string): Promise<string> {
+  return getSignedUrl(s3!, new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }), { expiresIn: PRESIGNED_TTL });
+}
+
+async function s3RemovePhoto(pin: string): Promise<void> {
+  await s3!.send(new DeleteObjectCommand({ Bucket: S3_BUCKET, Key: s3Key(pin) }));
+}
+
+async function s3Download(pin: string): Promise<Buffer | null> {
+  try {
+    const res = await s3!.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: s3Key(pin) }));
+    const chunks: Buffer[] = [];
+    for await (const chunk of res.Body as any) {
+      chunks.push(chunk instanceof Buffer ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  } catch {
+    return null;
+  }
+}
 
 // Body parser apenas para endpoints do REP (text/plain ou application/push).
 // Sem isso, multer não receberia multipart porque text() consome qualquer Content-Type.
@@ -396,10 +452,13 @@ async function parseAndSavePhotos(sn: string, body: string, kind: string, source
     } catch {}
     if (!same) {
       fs.writeFileSync(fullPath, buf);
+      if (s3) {
+        try { await s3Upload(pin, buf); } catch (e) { console.error(`[S3] upload pin=${pin} error:`, e); }
+      }
       await prisma.user.upsert({
         where: { pin },
-        create: { pin, photo_path: filename, photo_blob: buf },
-        update: { photo_path: filename, photo_blob: buf },
+        create: { pin, photo_path: s3 ? s3Key(pin) : filename, photo_blob: buf },
+        update: { photo_path: s3 ? s3Key(pin) : filename, photo_blob: buf },
       });
     }
     console.log(`[ZK]   pin=${pin} ${same ? "(unchanged)" : "saved"} ${buf.length}B → ${filename}`);
@@ -564,15 +623,20 @@ setInterval(async () => {
     for (const op of ops) {
       console.log(`[ZK] Retry photo_op ${op.operation_id} (tentativa ${op.attempt_count + 1})`);
       if (op.op_type === "upsert") {
-        const user = await prisma.user.findUnique({ where: { pin: op.pin }, select: { photo_blob: true } });
-        if (!user?.photo_blob) {
+        let jpeg: Buffer | null = null;
+        if (s3) {
+          jpeg = await s3Download(op.pin);
+        } else {
+          const user = await prisma.user.findUnique({ where: { pin: op.pin }, select: { photo_blob: true } });
+          if (user?.photo_blob) jpeg = Buffer.from(user.photo_blob);
+        }
+        if (!jpeg) {
           await prisma.photoOp.update({
             where: { id: op.id },
-            data: { status: "error", error_detail: "photo_blob ausente no banco" },
+            data: { status: "error", error_detail: s3 ? "foto ausente no S3" : "photo_blob ausente no banco" },
           });
           continue;
         }
-        const jpeg = Buffer.from(user.photo_blob);
         const b64 = jpeg.toString("base64");
         const hash = crypto.createHash("sha256").update(jpeg).digest("hex");
         await prisma.command.create({
@@ -801,7 +865,7 @@ app.get("/api/users", async (_req, res) => {
   const users = await prisma.user.findMany({
     select: {
       pin: true, name: true, privilege: true, password: true, card: true,
-      photo_path: true, photo_hash: true, photo_synced_at: true,
+      photo_path: true, photo_hash: true, photo_synced_at: true, soltech_user_id: true,
     },
   });
   // Subquery MAX(id) GROUP BY pin — Prisma não tem equivalente direto.
@@ -816,7 +880,7 @@ app.get("/api/users", async (_req, res) => {
   const photoOpByPin = new Map(latestPhotoOps.map(r => [r.pin, r]));
   const userOpByPin = new Map(latestUserOps.map(r => [r.pin, r]));
 
-  res.json(users.map(u => {
+  const results = await Promise.all(users.map(async u => {
     const pop = photoOpByPin.get(u.pin);
     const uop = userOpByPin.get(u.pin);
     const photoSync = u.photo_path
@@ -825,10 +889,15 @@ app.get("/api/users", async (_req, res) => {
     const userSync = uop
       ? { status: uop.status, operation_id: uop.operation_id, error_detail: uop.error_detail }
       : null;
-    const base = {
-      ...u,
-      photo_synced_at: u.photo_synced_at?.toISOString() ?? null,
-    };
+    const base = { ...u, photo_synced_at: u.photo_synced_at?.toISOString() ?? null };
+    if (s3 && (u.soltech_user_id || u.photo_path)) {
+      // Soltech photos take priority: biometrics/{soltechUserId}/face-photo.jpg
+      const key = u.soltech_user_id
+        ? `biometrics/${u.soltech_user_id}/face-photo.jpg`
+        : s3Key(u.pin);
+      const url = await s3PresignKey(key).catch(() => null);
+      return { ...base, photo_url: url, photoSync: url ? photoSync : null, userSync };
+    }
     if (!u.photo_path) return { ...base, photoSync, userSync };
     try {
       const v = Math.floor(fs.statSync(path.join(PHOTOS_DIR, u.photo_path)).mtimeMs);
@@ -837,6 +906,31 @@ app.get("/api/users", async (_req, res) => {
       return { ...base, photo_path: null, photoSync: null, userSync };
     }
   }));
+  res.json(results);
+});
+
+// Mapeamento bulk: POST /api/soltech-ids  body: [{ pin, soltechUserId }]
+app.post("/api/soltech-ids", express.json(), async (req, res) => {
+  const mappings: { pin: string; soltechUserId: string }[] = req.body;
+  if (!Array.isArray(mappings)) return res.status(400).json({ error: "Body deve ser um array de { pin, soltechUserId }" });
+  let updated = 0;
+  for (const { pin, soltechUserId } of mappings) {
+    if (!pin || !soltechUserId) continue;
+    await prisma.user.updateMany({ where: { pin }, data: { soltech_user_id: soltechUserId } });
+    updated++;
+  }
+  broadcast({ type: "users_updated" });
+  res.json({ success: true, updated });
+});
+
+// Mapeamento individual: PUT /api/users/:pin/soltech-id  body: { soltechUserId }
+app.put("/api/users/:pin/soltech-id", express.json(), async (req, res) => {
+  const { pin } = req.params;
+  const { soltechUserId } = req.body;
+  if (!soltechUserId) return res.status(400).json({ error: "soltechUserId obrigatório" });
+  await prisma.user.updateMany({ where: { pin }, data: { soltech_user_id: soltechUserId } });
+  broadcast({ type: "users_updated" });
+  res.json({ success: true });
 });
 
 app.post("/api/users", express.json(), async (req, res) => {
@@ -899,15 +993,22 @@ app.post("/api/users/:pin/photo", photoUpload.single("photo"), async (req, res) 
 
     const optimized = await optimizeForRep(req.file.buffer);
     const filename = `${pin}.jpg`;
-
     const hash = crypto.createHash("sha256").update(optimized).digest("hex");
+
+    // 1) S3 primeiro (se configurado)
+    if (s3) {
+      await s3Upload(pin, optimized);
+    } else {
+      fs.writeFileSync(path.join(PHOTOS_DIR, filename), optimized);
+    }
+
     await prisma.user.upsert({
       where: { pin },
-      create: { pin, photo_blob: optimized, photo_path: filename, photo_hash: hash, photo_synced_at: null },
-      update: { photo_blob: optimized, photo_path: filename, photo_hash: hash, photo_synced_at: null },
+      create: { pin, photo_blob: optimized, photo_path: s3 ? s3Key(pin) : filename, photo_hash: hash, photo_synced_at: null },
+      update: { photo_blob: optimized, photo_path: s3 ? s3Key(pin) : filename, photo_hash: hash, photo_synced_at: null },
     });
-    fs.writeFileSync(path.join(PHOTOS_DIR, filename), optimized);
 
+    // 2) Enfileira pro REP
     await enqueuePhotoUpdate(pin, optimized);
 
     broadcast({ type: "users_updated" });
@@ -920,20 +1021,31 @@ app.post("/api/users/:pin/photo", photoUpload.single("photo"), async (req, res) 
 
 app.post("/api/users/:pin/photo/sync", async (req, res) => {
   const { pin } = req.params;
-  const user = await prisma.user.findUnique({ where: { pin }, select: { photo_blob: true } });
-  if (!user?.photo_blob) return res.status(404).json({ error: "Nenhuma foto no banco para este usuário" });
-  const jpeg = Buffer.from(user.photo_blob);
+  let jpeg: Buffer | null = null;
+  if (s3) {
+    jpeg = await s3Download(pin);
+    if (!jpeg) return res.status(404).json({ error: "Nenhuma foto no S3 para este usuário" });
+  } else {
+    const user = await prisma.user.findUnique({ where: { pin }, select: { photo_blob: true } });
+    if (!user?.photo_blob) return res.status(404).json({ error: "Nenhuma foto no banco para este usuário" });
+    jpeg = Buffer.from(user.photo_blob);
+  }
   await enqueuePhotoUpdate(pin, jpeg);
   res.json({ success: true });
 });
 
 app.delete("/api/users/:pin/photo", async (req, res) => {
   const { pin } = req.params;
+  // 1) Remove do S3 (se configurado) e do filesystem local
+  if (s3) {
+    try { await s3RemovePhoto(pin); } catch {}
+  }
+  try { fs.unlinkSync(path.join(PHOTOS_DIR, `${pin}.jpg`)); } catch {}
   await prisma.user.update({
     where: { pin },
     data: { photo_blob: null, photo_path: null, photo_hash: null, photo_synced_at: null },
   });
-  try { fs.unlinkSync(path.join(PHOTOS_DIR, `${pin}.jpg`)); } catch {}
+  // 2) Enfileira delete pro REP
   await enqueuePhotoDelete(pin);
   broadcast({ type: "users_updated" });
   res.json({ success: true });
