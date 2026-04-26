@@ -39,9 +39,12 @@ services:
     restart: unless-stopped
     ports:
       - "80:80"
+      - "8080:8080" # gateway ADMS: REP aponta aqui; nginx faz mirror para Soltech + zekateco backend
     depends_on:
       - backend
-    networks: [internal]
+    networks:
+      - internal
+      - soltech # rede compartilhada com Soltech (resolve "ultraponto-api" por DNS)
 
 volumes:
   mysql_data:
@@ -50,3 +53,6 @@ volumes:
 networks:
   internal:
     driver: bridge
+  soltech:
+    external: true
+    name: soltech_db_network
