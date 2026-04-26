@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+enum OpType {
+  upsert
+  delete
+}
+
+enum OpStatus {
+  pending
+  sent
+  success
+  error
+  critical
+}
+
+model Device {
+  sn        String    @id @db.VarChar(64)
+  alias     String?   @db.VarChar(255)
+  last_seen DateTime?
+  ip        String?   @db.VarChar(64)
+
+  @@map("devices")
+}
+
+model User {
+  pin             String    @id @db.VarChar(32)
+  name            String?   @db.VarChar(255)
+  privilege       Int       @default(0)
+  password        String?   @db.VarChar(255)
+  card            String?   @db.VarChar(64)
+  group_id        Int       @default(1)
+  photo_path      String?   @db.VarChar(512)
+  photo_blob      Bytes?    @db.LongBlob
+  photo_hash      String?   @db.VarChar(128)
+  photo_synced_at DateTime?
+
+  @@map("users")
+}
+
+model Log {
+  id          Int       @id @default(autoincrement())
+  sn          String?   @db.VarChar(64)
+  pin         String?   @db.VarChar(32)
+  time        DateTime?
+  status      Int?
+  verify_type Int?
+
+  @@unique([sn, pin, time], map: "idx_logs_unique")
+  @@map("logs")
+}
+
+model Command {
+  id         Int      @id @default(autoincrement())
+  sn         String?  @db.VarChar(64)
+  command    String?  @db.Text
+  status     Int      @default(0)
+  created_at DateTime @default(now())
+
+  @@index([sn, status], map: "idx_commands_sn_status")
+  @@map("commands")
+}
+
+model PhotoOp {
+  id            Int       @id @default(autoincrement())
+  operation_id  String    @unique @db.VarChar(64)
+  sn            String    @db.VarChar(64)
+  pin           String    @db.VarChar(32)
+  op_type       OpType
+  status        OpStatus  @default(pending)
+  attempt_count Int       @default(0)
+  max_attempts  Int       @default(5)
+  next_retry_at DateTime?
+  command_id    Int?
+  photo_hash    String?   @db.VarChar(128)
+  error_detail  String?   @db.Text
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+
+  @@index([status, next_retry_at], map: "idx_photo_ops_retry")
+  @@map("photo_ops")
+}
+
+model UserOp {
+  id            Int       @id @default(autoincrement())
+  operation_id  String    @unique @db.VarChar(64)
+  sn            String    @db.VarChar(64)
+  pin           String    @db.VarChar(32)
+  op_type       OpType
+  status        OpStatus  @default(pending)
+  attempt_count Int       @default(0)
+  max_attempts  Int       @default(5)
+  next_retry_at DateTime?
+  command_id    Int?
+  error_detail  String?   @db.Text
+  created_at    DateTime  @default(now())
+  updated_at    DateTime  @default(now()) @updatedAt
+
+  @@index([status, next_retry_at], map: "idx_user_ops_retry")
+  @@map("user_ops")
+}
