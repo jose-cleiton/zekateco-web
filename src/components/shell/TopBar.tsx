@@ -8,14 +8,18 @@ interface Props {
 
 export function TopBar({ dark, onToggleTheme, onSearch }: Props) {
   return (
-    <header className="h-12 bg-up-500 text-white flex items-center px-4 shadow-[var(--shadow-card)] relative z-30">
-      <div className="flex items-center gap-2 font-semibold tracking-tight text-[15px]">
-        <span className="inline-flex items-center justify-center w-6 h-6 rounded-md bg-white/15">
-          <svg viewBox="0 0 24 24" width={14} height={14} aria-hidden>
-            <path d="M12 3 L21 19 H3 Z" fill="currentColor" />
-          </svg>
+    <header className="h-12 bg-up-500 text-white flex items-center px-4 shadow-(--shadow-card) relative z-30">
+      <div className="flex items-center gap-3">
+        <img
+          src="/ultraponto-logo.svg"
+          alt="Ultraponto"
+          className="h-9 w-auto"
+          style={{ filter: "brightness(0) invert(1)" }}
+        />
+        <span className="text-white/40 text-[18px] font-light leading-none -mt-0.5">|</span>
+        <span className="font-semibold tracking-tight text-[13px] text-white/90">
+          Webserver
         </span>
-        <span>Ultraponto Webserver</span>
       </div>
       <div className="ml-auto flex items-center gap-1">
         <button className="p-2 hover:bg-white/10 rounded-md transition-colors" title="Tema" onClick={onToggleTheme}>
