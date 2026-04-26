@@ -10,12 +10,7 @@ export function TopBar({ dark, onToggleTheme, onSearch }: Props) {
   return (
     <header className="h-12 bg-up-500 text-white flex items-center px-4 shadow-(--shadow-card) relative z-30">
       <div className="flex items-center gap-3">
-        <img
-          src="/ultraponto-logo.svg"
-          alt="Ultraponto"
-          className="h-9 w-auto"
-          style={{ filter: "brightness(0) invert(1)" }}
-        />
+        <img src="/ultraponto-logo.svg" alt="Ultraponto" className="h-9 w-auto" />
         <span className="text-white/40 text-[18px] font-light leading-none -mt-0.5">|</span>
         <span className="font-semibold tracking-tight text-[13px] text-white/90">
           Webserver

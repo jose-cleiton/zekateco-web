@@ -8,7 +8,7 @@
   --color-up-200: #FFD09A;
   --color-up-300: #FFB060;
   --color-up-400: #FF9836;
-  --color-up-500: #F58220;
+  --color-up-500: #F58220;  /* brand primary */
   --color-up-600: #E5701A;
   --color-up-700: #C45A12;
   --color-up-800: #9A4810;
@@ -46,7 +46,7 @@ html.dark .nice-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,.
 
 .tab-active::after{
   content:""; position:absolute; left:10px; right:10px; bottom:-1px; height:2px;
-  background: #F58220; border-radius: 2px;
+  background: var(--color-up-500); border-radius: 2px;
 }
 
 .tab-x:hover { background: rgba(0,0,0,.08); border-radius: 999px; }
