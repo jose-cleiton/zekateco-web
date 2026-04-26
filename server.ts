@@ -666,33 +666,59 @@ setInterval(async () => {
   }
 }, 60_000);
 
-// 3. Command Polling
+// 3. Command Polling — gateway: Soltech autoritativo, zekateco como fallback.
+// O REP só carrega um endereço de servidor, então pra a fila do zekateco
+// chegar até ele este endpoint consulta o Soltech primeiro e, se ele não tiver
+// nada (resposta "OK" sem comando), serve da fila local.
+const SOLTECH_GATEWAY_URL = process.env.SOLTECH_GATEWAY_URL || "http://ultraponto-api:8080";
+const SOLTECH_TIMEOUT_MS = parseInt(process.env.SOLTECH_TIMEOUT_MS || "5000");
+
 app.get("/iclock/getrequest", async (req, res) => {
   const { SN } = req.query;
   if (SN) await updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
 
+  // 1) Soltech tem prioridade — é quem orquestra a base de usuários e jornadas.
+  let soltechBody = "";
+  try {
+    const r = await fetch(`${SOLTECH_GATEWAY_URL}${req.originalUrl}`, {
+      method: "GET",
+      headers: { "User-Agent": (req.headers["user-agent"] as string) || "iClock Proxy" },
+      signal: AbortSignal.timeout(SOLTECH_TIMEOUT_MS),
+    });
+    if (r.ok) {
+      soltechBody = await r.text();
+    } else {
+      console.warn(`[ZK] getrequest gateway: Soltech HTTP ${r.status}; fallback para fila local`);
+    }
+  } catch (e: any) {
+    console.warn(`[ZK] getrequest gateway: Soltech inacessível (${e.message}); fallback para fila local`);
+  }
+
+  // 2) Soltech entregou comando → repassa intacto, sem tocar na fila local.
+  if (soltechBody.startsWith("C:")) {
+    return res.type("text/plain").send(soltechBody);
+  }
+
+  // 3) Soltech sem comando — serve da fila do zekateco (UPDATE user/photo do dashboard).
   const command = await prisma.command.findFirst({
     where: { sn: SN as string, status: 0 },
     orderBy: { id: "asc" },
   });
-
-  if (command) {
-    await prisma.command.update({ where: { id: command.id }, data: { status: 1 } });
-    // Atualiza op para 'sent' para feedback visual imediato no dashboard.
-    const userOp = await prisma.userOp.findFirst({ where: { command_id: command.id, status: "pending" } });
-    if (userOp) {
-      await prisma.userOp.update({ where: { id: userOp.id }, data: { status: "sent" } });
-      broadcast({ type: "user_op_update", operation_id: userOp.operation_id, status: "sent", pin: userOp.pin });
-    }
-    const photoOp = await prisma.photoOp.findFirst({ where: { command_id: command.id, status: "pending" } });
-    if (photoOp) {
-      await prisma.photoOp.update({ where: { id: photoOp.id }, data: { status: "sent" } });
-      broadcast({ type: "photo_op_update", operation_id: photoOp.operation_id, status: "sent", pin: photoOp.pin });
-    }
-    res.type("text/plain").send(`C:${command.id}:${command.command}\r\n`);
-  } else {
-    res.type("text/plain").send("OK");
+  if (!command) {
+    return res.type("text/plain").send(soltechBody || "OK");
   }
+  await prisma.command.update({ where: { id: command.id }, data: { status: 1 } });
+  const userOp = await prisma.userOp.findFirst({ where: { command_id: command.id, status: "pending" } });
+  if (userOp) {
+    await prisma.userOp.update({ where: { id: userOp.id }, data: { status: "sent" } });
+    broadcast({ type: "user_op_update", operation_id: userOp.operation_id, status: "sent", pin: userOp.pin });
+  }
+  const photoOp = await prisma.photoOp.findFirst({ where: { command_id: command.id, status: "pending" } });
+  if (photoOp) {
+    await prisma.photoOp.update({ where: { id: photoOp.id }, data: { status: "sent" } });
+    broadcast({ type: "photo_op_update", operation_id: photoOp.operation_id, status: "sent", pin: photoOp.pin });
+  }
+  res.type("text/plain").send(`C:${command.id}:${command.command}\r\n`);
 });
 
 // 4. Command Result
@@ -707,7 +733,12 @@ app.post("/iclock/devicecmd", async (req, res) => {
     const cmdId = parseInt(match[1]);
     const ret = parseInt(match[2]);
     // Return ≥ 0 = success (N records). Negatives = error codes.
-    await prisma.command.update({ where: { id: cmdId }, data: { status: ret >= 0 ? 2 : 3 } });
+    // updateMany (em vez de update) e guarda count > 0: no setup mirror, o REP envia
+    // acks de comandos enfileirados pelo Soltech — esses IDs não existem aqui.
+    const upd = await prisma.command.updateMany({ where: { id: cmdId }, data: { status: ret >= 0 ? 2 : 3 } });
+    if (upd.count === 0) {
+      return res.type("text/plain").send("OK");
+    }
     broadcast({ type: "command_result", id: cmdId, success: ret >= 0 });
 
     const photoOp = await prisma.photoOp.findFirst({ where: { command_id: cmdId } });

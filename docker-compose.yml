@@ -14,7 +14,12 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [internal]
+    # Alias unico evita colisao com o service "db" do compose do Soltech (mysql-db),
+    # que tambem e visivel pelo backend agora que ele entrou em soltech_db_network.
+    networks:
+      internal:
+        aliases:
+          - zekateco-db
 
   backend:
     build:
@@ -22,15 +27,19 @@ services:
       dockerfile: docker/backend/Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/${MYSQL_DATABASE}
+      DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@zekateco-db:3306/${MYSQL_DATABASE}
       PORT: 3000
       NODE_ENV: production
+      # Gateway de comandos: backend chama Soltech via DNS docker antes de servir fila local.
+      SOLTECH_GATEWAY_URL: http://ultraponto-api:8080
     volumes:
       - photos_data:/app/photos
     depends_on:
       db:
         condition: service_healthy
-    networks: [internal]
+    networks:
+      - internal
+      - soltech # precisa resolver ultraponto-api pra rota /iclock/getrequest
 
   frontend:
     build:
@@ -38,7 +47,7 @@ services:
       dockerfile: docker/frontend/Dockerfile
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "81:80" # dashboard local: 80 do host esta ocupado, mantemos 81
       - "8080:8080" # gateway ADMS: REP aponta aqui; nginx faz mirror para Soltech + zekateco backend
     depends_on:
       - backend
