@@ -51,6 +51,7 @@ db.exec(`
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
+
   CREATE TABLE IF NOT EXISTS photo_ops (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     operation_id  TEXT UNIQUE NOT NULL,
@@ -105,6 +106,17 @@ for (const ddl of [
     if (!String(e.message).includes("duplicate column")) throw e;
   }
 }
+
+// Limpa lixo do REP: PIN 0 (eventos sem usuário identificado) e duplicatas.
+// Depois cria índice UNIQUE em (sn, pin, time) — REP envia mesmo evento via
+// rtlog E ATTLOG, então (sn, pin, time) é nossa chave de identidade.
+db.exec(`
+  DELETE FROM logs WHERE pin = '0' OR pin IS NULL OR pin = '';
+  DELETE FROM logs WHERE id NOT IN (
+    SELECT MIN(id) FROM logs GROUP BY sn, pin, time
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_logs_unique ON logs(sn, pin, time);
+`);
 
 const app = express();
 const server = http.createServer(app);
@@ -299,10 +311,14 @@ app.post("/iclock/cdata", (req, res) => {
         [pin, time, status, verifyType] = line.split("\t");
       }
 
-      if (!pin) continue;
-      const info = db.prepare("INSERT INTO logs (sn, pin, time, status, verify_type) VALUES (?, ?, ?, ?, ?)")
+      if (!pin || pin === "0") continue; // PIN 0 = evento sem usuário identificado, ignora
+      // INSERT OR IGNORE: evita duplicatas quando rtlog e ATTLOG entregam o mesmo evento.
+      const info = db.prepare("INSERT OR IGNORE INTO logs (sn, pin, time, status, verify_type) VALUES (?, ?, ?, ?, ?)")
         .run(SN as string, pin, time, status || 0, verifyType || 0);
-      broadcast({ type: "new_log", log: { id: info.lastInsertRowid, sn: SN, pin, time, status, verifyType } });
+      // changes === 0 significa duplicata ignorada — não broadcasta.
+      if (info.changes > 0) {
+        broadcast({ type: "new_log", log: { id: info.lastInsertRowid, sn: SN, pin, time, status, verifyType } });
+      }
     }
   } else if (t === "OPERLOG") {
     debugDump(SN as string, "cdata-OPERLOG", body);
@@ -367,10 +383,12 @@ app.post("/iclock/querydata", (req, res) => {
         const eq = part.indexOf("=");
         if (eq > -1) data[part.slice(0, eq)] = part.slice(eq + 1);
       });
-      if (!data.pin) continue;
-      db.prepare("INSERT INTO logs (sn, pin, time, status, verify_type) VALUES (?, ?, ?, ?, ?)")
+      if (!data.pin || data.pin === "0") continue; // PIN 0 = evento sem usuário identificado, ignora
+      const r = db.prepare("INSERT OR IGNORE INTO logs (sn, pin, time, status, verify_type) VALUES (?, ?, ?, ?, ?)")
         .run(SN as string, data.pin, data.time || "", data.status || 0, data.verify || 0);
-      broadcast({ type: "new_log", log: { sn: SN, ...data } });
+      if (r.changes > 0) {
+        broadcast({ type: "new_log", log: { id: r.lastInsertRowid, sn: SN, ...data } });
+      }
     }
   } else {
     console.log(`[ZK] querydata unknown tablename: ${tablename}`);

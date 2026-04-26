@@ -37,16 +37,12 @@ export type TabId =
   | "novo-usuario"
   | "lista-usuarios"
   | "edit-usuario"
-  | "turno-cad"
-  | "turno-list"
   | "rt"
   | "info-reg"
   | "rel"
   | "dispositivo"
   | "dados"
-  | "fw"
-  | "bloq-list"
-  | "bloq-novo";
+  | "fw";
 
 export interface Tab {
   id: string;

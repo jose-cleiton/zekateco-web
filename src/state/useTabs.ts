@@ -6,16 +6,12 @@ const LABELS: Record<string, string> = {
   "novo-usuario": "Novo usuário",
   "lista-usuarios": "Usuários",
   "edit-usuario": "Editar",
-  "turno-cad": "Cadastrar turno",
-  "turno-list": "Lista de turnos",
   "rt": "Registros em tempo real",
   "info-reg": "Info reg",
   "rel": "Relatório",
   "dispositivo": "Dispositivo",
   "dados": "Dados",
   "fw": "Atualizar FW",
-  "bloq-list": "Bloqueios",
-  "bloq-novo": "Novo bloqueio",
 };
 
 export function useTabs() {

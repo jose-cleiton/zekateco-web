@@ -17,8 +17,6 @@ import { RelatorioScreen } from "./screens/RelatorioScreen";
 import { DispositivoScreen } from "./screens/DispositivoScreen";
 import { DadosScreen } from "./screens/DadosScreen";
 import { FwScreen } from "./screens/FwScreen";
-import { TurnoScreen } from "./screens/TurnoScreen";
-import { BloqueioScreen } from "./screens/BloqueioScreen";
 
 const THEME_KEY = "ultraponto:theme";
 
@@ -82,9 +80,6 @@ export default function App() {
               onCancel={() => { setEditingUser(null); close("edit-usuario"); }}
             />
           : <div className="p-6 text-ink-500">Selecione um usuário na lista para editar.</div>;
-      case "turno-cad":
-      case "turno-list":
-        return <TurnoScreen />;
       case "rt":
         return <RealtimeScreen logs={logs} users={users} />;
       case "info-reg":
@@ -97,9 +92,6 @@ export default function App() {
         return <DadosScreen users={users} logs={logs} />;
       case "fw":
         return <FwScreen />;
-      case "bloq-list":
-      case "bloq-novo":
-        return <BloqueioScreen />;
       default:
         return <div className="p-6 text-ink-500">Tela não implementada: {active}</div>;
     }

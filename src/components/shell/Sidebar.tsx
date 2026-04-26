@@ -1,9 +1,9 @@
 import {
-  Home, Users, Calendar, BarChart3, LogIn, Lock,
-  UserPlus, List, CalendarPlus, ListChecks,
+  Home, Users, BarChart3, LogIn,
+  UserPlus, List,
   Activity, FileText, FileBarChart,
   Monitor, Database, UploadCloud,
-  ShieldOff, ShieldPlus, ChevronDown,
+  ChevronDown,
   Plus, Minus,
   type LucideIcon,
 } from "lucide-react";
@@ -20,10 +20,6 @@ const MENU: MenuItem[] = [
     { id: "novo-usuario", label: "Novo usuário", icon: UserPlus },
     { id: "lista-usuarios", label: "Usuários", icon: List },
   ]},
-  { id: "turno", label: "Turno", icon: Calendar, children: [
-    { id: "turno-cad", label: "Cadastrar turno", icon: CalendarPlus },
-    { id: "turno-list", label: "Lista de turnos", icon: ListChecks },
-  ]},
   { id: "relatorio", label: "Relatório", icon: BarChart3, children: [
     { id: "rt", label: "Registros em tempo real", icon: Activity },
     { id: "info-reg", label: "Info reg", icon: FileText },
@@ -33,10 +29,6 @@ const MENU: MenuItem[] = [
     { id: "dispositivo", label: "Dispositivo", icon: Monitor },
     { id: "dados", label: "Dados", icon: Database },
     { id: "fw", label: "Atualizar FW", icon: UploadCloud },
-  ]},
-  { id: "bloqueio", label: "Bloqueio", icon: Lock, children: [
-    { id: "bloq-list", label: "Lista de bloqueios", icon: ShieldOff },
-    { id: "bloq-novo", label: "Novo bloqueio", icon: ShieldPlus },
   ]},
 ];
 
