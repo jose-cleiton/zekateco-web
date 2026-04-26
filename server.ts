@@ -8,6 +8,7 @@ import fs from "fs";
 import multer from "multer";
 import sharp from "sharp";
 import { fileURLToPath } from "url";
+import crypto from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -49,17 +50,60 @@ db.exec(`
     status INTEGER DEFAULT 0, -- 0: Pending, 1: Sent, 2: Success, 3: Error
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
+
+  CREATE TABLE IF NOT EXISTS photo_ops (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id  TEXT UNIQUE NOT NULL,
+    sn            TEXT NOT NULL,
+    pin           TEXT NOT NULL,
+    op_type       TEXT NOT NULL CHECK(op_type IN ('upsert','delete')),
+    status        TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','sent','success','error','critical')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts  INTEGER NOT NULL DEFAULT 5,
+    next_retry_at TEXT,
+    command_id    INTEGER,
+    photo_hash    TEXT,
+    error_detail  TEXT,
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_photo_ops_retry
+    ON photo_ops(status, next_retry_at)
+    WHERE status IN ('pending','error');
+
+  CREATE TABLE IF NOT EXISTS user_ops (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    operation_id  TEXT UNIQUE NOT NULL,
+    sn            TEXT NOT NULL,
+    pin           TEXT NOT NULL,
+    op_type       TEXT NOT NULL CHECK(op_type IN ('upsert','delete')),
+    status        TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN ('pending','sent','success','error','critical')),
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    max_attempts  INTEGER NOT NULL DEFAULT 5,
+    next_retry_at TEXT,
+    command_id    INTEGER,
+    error_detail  TEXT,
+    created_at    TEXT DEFAULT (datetime('now')),
+    updated_at    TEXT DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_user_ops_retry
+    ON user_ops(status, next_retry_at)
+    WHERE status IN ('pending','error');
 `);
 
-try {
-  db.exec("ALTER TABLE users ADD COLUMN photo_path TEXT");
-} catch (e: any) {
-  if (!String(e.message).includes("duplicate column")) throw e;
-}
-try {
-  db.exec("ALTER TABLE users ADD COLUMN photo_blob BLOB");
-} catch (e: any) {
-  if (!String(e.message).includes("duplicate column")) throw e;
+for (const ddl of [
+  "ALTER TABLE users ADD COLUMN photo_path TEXT",
+  "ALTER TABLE users ADD COLUMN photo_blob BLOB",
+  "ALTER TABLE users ADD COLUMN photo_hash TEXT",
+  "ALTER TABLE users ADD COLUMN photo_synced_at TEXT",
+]) {
+  try { db.exec(ddl); } catch (e: any) {
+    if (!String(e.message).includes("duplicate column")) throw e;
+  }
 }
 
 const app = express();
@@ -148,6 +192,10 @@ setInterval(() => {
       sess.socket.destroy();
       deviceSessions.delete(sn);
       broadcast({ type: "device_update", sn, online: false });
+      // Comandos "sent" mas sem ack voltam para pending — serão reentregues ao reconectar.
+      db.prepare("UPDATE commands SET status=0 WHERE sn=? AND status=1").run(sn);
+      db.prepare("UPDATE user_ops  SET status='pending', next_retry_at=NULL WHERE sn=? AND status='sent'").run(sn);
+      db.prepare("UPDATE photo_ops SET status='pending', next_retry_at=NULL WHERE sn=? AND status='sent'").run(sn);
     }
   }
 }, 15_000);
@@ -270,18 +318,23 @@ app.post("/iclock/cdata", (req, res) => {
     parseAndSaveUsers(SN as string, body, "cdata-USERINFO");
   } else if (t === "userpic" || t === "biophoto") {
     debugDump(SN as string, `cdata-${t}`, body);
-    const count = parseAndSavePhotos(SN as string, body, t, `cdata-${t}`);
+    parseAndSavePhotos(SN as string, body, t, `cdata-${t}`);
     res.set("Connection", "close");
-    return res.type("text/plain").send(`${t}=${count}\n`);
+    res.type("text/plain").send("OK");
+    // Destroy the socket after flush to cut off HTTP-pipelined duplicates.
+    req.socket?.once("finish", () => req.socket?.destroy());
+    return;
   } else if (t === "tabledata" || /^(biophoto|userpic)\b/.test(body.trimStart())) {
     // Push automático após cadastro: device manda `?table=tabledata` com
     // body começando em `biophoto<TAB>pin=...<TAB>content=<base64>`. Detectado
     // tanto pelo URL quanto pelo prefixo do corpo (alguns firmwares variam).
     const kind = /^biophoto/i.test(body.trimStart()) ? "biophoto" : "userpic";
     debugDump(SN as string, `cdata-tabledata-${kind}`, body);
-    const count = parseAndSavePhotos(SN as string, body, kind, `cdata-tabledata-${kind}`);
+    parseAndSavePhotos(SN as string, body, kind, `cdata-tabledata-${kind}`);
     res.set("Connection", "close");
-    return res.type("text/plain").send(`${kind}=${count}\n`);
+    res.type("text/plain").send("OK");
+    req.socket?.once("finish", () => req.socket?.destroy());
+    return;
   } else {
     debugDump(SN as string, `cdata-unknown-${t}`, body);
     console.log(`[ZK] cdata POST unknown table: ${t}, body: ${body?.slice(0, 200)}`);
@@ -361,14 +414,19 @@ function parseAndSaveUsers(sn: string, body: string, source: string) {
     const card = data.card || data.cardno || "";
 
     if (pin) {
-      db.prepare("INSERT OR REPLACE INTO users (pin, name, privilege, password, card) VALUES (?, ?, ?, ?, ?)")
-        .run(pin, name, privilege, password, card);
+      db.prepare(`
+        INSERT INTO users (pin, name, privilege, password, card) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(pin) DO UPDATE SET
+          name = excluded.name,
+          privilege = excluded.privilege,
+          password = excluded.password,
+          card = excluded.card
+      `).run(pin, name, privilege, password, card);
       count++;
     }
   }
   console.log(`[ZK] ${source}: saved ${count} users from SN=${sn}`);
-  const users = db.prepare("SELECT * FROM users").all();
-  broadcast({ type: "users_updated", users });
+  broadcast({ type: "users_updated" });
 }
 
 function parseAndSavePhotos(sn: string, body: string, kind: string, source: string): number {
@@ -429,8 +487,7 @@ function parseAndSavePhotos(sn: string, body: string, kind: string, source: stri
     fs.appendFileSync(DEBUG_LOG, `\n[parseAndSavePhotos ${source}] 0 photos parsed. Body preview: ${body.slice(0, 400)}\n`);
   }
   if (saved > 0) {
-    const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all();
-    broadcast({ type: "users_updated", users });
+    broadcast({ type: "users_updated" });
   }
   return saved;
 }
@@ -453,30 +510,171 @@ async function optimizeForRep(input: Buffer): Promise<Buffer> {
   return out;
 }
 
+function generateOpId() {
+  return `pop_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function photoOpSetSuccess(opId: number, pin: string, operationId: string) {
+  db.prepare("UPDATE photo_ops SET status='success', updated_at=datetime('now') WHERE id=?").run(opId);
+  db.prepare("UPDATE users SET photo_synced_at=datetime('now') WHERE pin=?").run(pin);
+  broadcast({ type: "photo_op_update", operation_id: operationId, status: "success", pin });
+}
+
+function photoOpSetFailure(op: any, detail: string) {
+  const attempts = op.attempt_count + 1;
+  const backoffSecs = [30, 60, 120, 300, 600];
+  const delay = backoffSecs[Math.min(attempts - 1, backoffSecs.length - 1)];
+  const nextRetry = new Date(Date.now() + delay * 1000).toISOString();
+
+  if (attempts >= op.max_attempts) {
+    db.prepare("UPDATE photo_ops SET status='critical', attempt_count=?, error_detail=?, updated_at=datetime('now') WHERE id=?")
+      .run(attempts, detail, op.id);
+    console.log(`[ZK] photo_op ${op.operation_id} CRITICAL após ${attempts} tentativas: ${detail}`);
+    broadcast({ type: "photo_op_update", operation_id: op.operation_id, status: "critical", pin: op.pin });
+  } else {
+    db.prepare("UPDATE photo_ops SET status='error', attempt_count=?, next_retry_at=?, error_detail=?, updated_at=datetime('now') WHERE id=?")
+      .run(attempts, nextRetry, detail, op.id);
+    console.log(`[ZK] photo_op ${op.operation_id} falhou (tentativa ${attempts}/${op.max_attempts}), retry em ${delay}s`);
+    broadcast({ type: "photo_op_update", operation_id: op.operation_id, status: "error", pin: op.pin });
+  }
+}
+
 function enqueuePhotoUpdate(pin: string, jpeg: Buffer) {
   const b64 = jpeg.toString("base64");
+  const hash = crypto.createHash("sha256").update(jpeg).digest("hex");
   // BIOPHOTO Type=9 = Visible Light Face template (facial recognition).
   const cmdBio = `DATA UPDATE BIOPHOTO PIN=${pin}\tType=9\tNo=0\tIndex=0\tSize=${b64.length}\tContent=${b64}\tFormat=0`;
   // userpic = avatar shown on REP display (PDF §10, p.8861).
   const cmdPic = `DATA UPDATE userpic pin=${pin}\tsize=${b64.length}\tformat=0\tcontent=${b64}`;
   const devices = db.prepare("SELECT sn FROM devices").all() as any[];
   for (const dev of devices) {
+    const opId = generateOpId();
     db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmdBio);
-    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmdPic);
+    const picResult = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmdPic);
+    db.prepare("INSERT INTO photo_ops (operation_id, sn, pin, op_type, photo_hash, command_id) VALUES (?,?,?,'upsert',?,?)")
+      .run(opId, dev.sn, pin, hash, picResult.lastInsertRowid);
   }
-  console.log(`[ZK] photo update enqueued pin=${pin} size=${b64.length}B (biophoto+userpic) for ${devices.length} device(s)`);
+  db.prepare("UPDATE users SET photo_hash=?, photo_synced_at=NULL WHERE pin=?").run(hash, pin);
+  console.log(`[ZK] photo update enqueued pin=${pin} hash=${hash.slice(0, 8)}... for ${devices.length} device(s)`);
 }
 
 function enqueuePhotoDelete(pin: string) {
   const devices = db.prepare("SELECT sn FROM devices").all() as any[];
   for (const dev of devices) {
-    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)")
-      .run(dev.sn, `DATA DELETE biophoto PIN=${pin}\tType=9`);
-    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)")
-      .run(dev.sn, `DATA DELETE userpic pin=${pin}`);
+    const opId = generateOpId();
+    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, `DATA DELETE biophoto PIN=${pin}\tType=9`);
+    const delResult = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, `DATA DELETE userpic pin=${pin}`);
+    db.prepare("INSERT INTO photo_ops (operation_id, sn, pin, op_type, command_id) VALUES (?,?,?,'delete',?)")
+      .run(opId, dev.sn, pin, delResult.lastInsertRowid);
   }
   console.log(`[ZK] photo delete enqueued pin=${pin} for ${devices.length} device(s)`);
 }
+
+function enqueueUserUpsert(sn: string, pin: string, name: string, privilege: number, password: string, card: string): string {
+  const opId = generateOpId();
+  const cmd = `DATA UPDATE user Pin=${pin}\tName=${name}\tPrivilege=${privilege}\tPassword=${password}\tCardNo=${card}`;
+  const authCmd = `DATA UPDATE userauthorize Pin=${pin}\tAuthorizeTimezoneId=1\tAuthorizeDoorId=1`;
+  db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, cmd);
+  const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, authCmd);
+  db.prepare("INSERT INTO user_ops (operation_id, sn, pin, op_type, command_id) VALUES (?,?,?,'upsert',?)")
+    .run(opId, sn, pin, r.lastInsertRowid);
+  return opId;
+}
+
+function enqueueUserDelete(sn: string, pin: string): string {
+  const opId = generateOpId();
+  const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, `DATA DELETE user Pin=${pin}`);
+  db.prepare("INSERT INTO user_ops (operation_id, sn, pin, op_type, command_id) VALUES (?,?,?,'delete',?)")
+    .run(opId, sn, pin, r.lastInsertRowid);
+  return opId;
+}
+
+function userOpSetFailure(op: any, detail: string) {
+  const attempts = op.attempt_count + 1;
+  const backoffSecs = [30, 60, 120, 300, 600];
+  const delay = backoffSecs[Math.min(attempts - 1, backoffSecs.length - 1)];
+  const nextRetry = new Date(Date.now() + delay * 1000).toISOString();
+  if (attempts >= op.max_attempts) {
+    db.prepare("UPDATE user_ops SET status='critical', attempt_count=?, error_detail=?, updated_at=datetime('now') WHERE id=?")
+      .run(attempts, detail, op.id);
+    console.log(`[ZK] user_op ${op.operation_id} CRITICAL: ${detail}`);
+    broadcast({ type: "user_op_update", operation_id: op.operation_id, status: "critical", pin: op.pin });
+  } else {
+    db.prepare("UPDATE user_ops SET status='error', attempt_count=?, next_retry_at=?, error_detail=?, updated_at=datetime('now') WHERE id=?")
+      .run(attempts, nextRetry, detail, op.id);
+    broadcast({ type: "user_op_update", operation_id: op.operation_id, status: "error", pin: op.pin });
+  }
+}
+
+// Retry loop: reprocessa ops pendentes/com erro a cada 60s.
+setInterval(() => {
+  // --- photo_ops ---
+  const ops = db.prepare(`
+    SELECT * FROM photo_ops
+    WHERE status IN ('pending','error')
+      AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
+      AND attempt_count < max_attempts
+  `).all() as any[];
+
+  for (const op of ops) {
+    console.log(`[ZK] Retry photo_op ${op.operation_id} (tentativa ${op.attempt_count + 1})`);
+    if (op.op_type === "upsert") {
+      const user = db.prepare("SELECT photo_blob FROM users WHERE pin=?").get(op.pin) as any;
+      if (!user?.photo_blob) {
+        db.prepare("UPDATE photo_ops SET status='error', error_detail='photo_blob ausente no banco' WHERE id=?").run(op.id);
+        continue;
+      }
+      const jpeg = Buffer.from(user.photo_blob);
+      const b64 = jpeg.toString("base64");
+      const hash = crypto.createHash("sha256").update(jpeg).digest("hex");
+      db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn,
+        `DATA UPDATE BIOPHOTO PIN=${op.pin}\tType=9\tNo=0\tIndex=0\tSize=${b64.length}\tContent=${b64}\tFormat=0`);
+      const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn,
+        `DATA UPDATE userpic pin=${op.pin}\tsize=${b64.length}\tformat=0\tcontent=${b64}`);
+      db.prepare("UPDATE photo_ops SET command_id=?, attempt_count=attempt_count+1, status='pending', next_retry_at=NULL, photo_hash=?, updated_at=datetime('now') WHERE id=?")
+        .run(r.lastInsertRowid, hash, op.id);
+      broadcast({ type: "photo_op_update", operation_id: op.operation_id, status: "pending", pin: op.pin });
+    } else {
+      db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, `DATA DELETE biophoto PIN=${op.pin}\tType=9`);
+      const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, `DATA DELETE userpic pin=${op.pin}`);
+      db.prepare("UPDATE photo_ops SET command_id=?, attempt_count=attempt_count+1, status='pending', next_retry_at=NULL, updated_at=datetime('now') WHERE id=?")
+        .run(r.lastInsertRowid, op.id);
+      broadcast({ type: "photo_op_update", operation_id: op.operation_id, status: "pending", pin: op.pin });
+    }
+  }
+
+  // --- user_ops ---
+  const uops = db.prepare(`
+    SELECT * FROM user_ops
+    WHERE status IN ('pending','error')
+      AND (next_retry_at IS NULL OR next_retry_at <= datetime('now'))
+      AND attempt_count < max_attempts
+  `).all() as any[];
+
+  for (const op of uops) {
+    console.log(`[ZK] Retry user_op ${op.operation_id} (tentativa ${op.attempt_count + 1})`);
+    if (op.op_type === "upsert") {
+      const user = db.prepare("SELECT name, privilege, password, card FROM users WHERE pin=?").get(op.pin) as any;
+      if (!user) {
+        db.prepare("UPDATE user_ops SET status='error', error_detail='usuário não encontrado no banco' WHERE id=?").run(op.id);
+        broadcast({ type: "user_op_update", operation_id: op.operation_id, status: "error", pin: op.pin });
+        continue;
+      }
+      const cmd = `DATA UPDATE user Pin=${op.pin}\tName=${user.name}\tPrivilege=${user.privilege}\tPassword=${user.password || ""}\tCardNo=${user.card || ""}`;
+      const auth = `DATA UPDATE userauthorize Pin=${op.pin}\tAuthorizeTimezoneId=1\tAuthorizeDoorId=1`;
+      db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, cmd);
+      const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, auth);
+      db.prepare("UPDATE user_ops SET command_id=?, attempt_count=attempt_count+1, status='pending', next_retry_at=NULL, updated_at=datetime('now') WHERE id=?")
+        .run(r.lastInsertRowid, op.id);
+      broadcast({ type: "user_op_update", operation_id: op.operation_id, status: "pending", pin: op.pin });
+    } else {
+      const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, `DATA DELETE user Pin=${op.pin}`);
+      db.prepare("UPDATE user_ops SET command_id=?, attempt_count=attempt_count+1, status='pending', next_retry_at=NULL, updated_at=datetime('now') WHERE id=?")
+        .run(r.lastInsertRowid, op.id);
+      broadcast({ type: "user_op_update", operation_id: op.operation_id, status: "pending", pin: op.pin });
+    }
+  }
+}, 60_000);
 
 // 3. Command Polling
 app.get("/iclock/getrequest", (req, res) => {
@@ -487,7 +685,16 @@ app.get("/iclock/getrequest", (req, res) => {
     .get(SN as string) as any;
 
   if (command) {
-    db.prepare("UPDATE commands SET status = 1 WHERE id = ?").run(command.id);
+    db.prepare("UPDATE commands SET status=1 WHERE id=?").run(command.id);
+    // Atualiza op para 'sent' para feedback visual imediato no dashboard.
+    for (const table of ["user_ops", "photo_ops"]) {
+      const op = db.prepare(`SELECT * FROM ${table} WHERE command_id=? AND status='pending'`).get(command.id) as any;
+      if (op) {
+        db.prepare(`UPDATE ${table} SET status='sent', updated_at=datetime('now') WHERE id=?`).run(op.id);
+        const evtType = table === "user_ops" ? "user_op_update" : "photo_op_update";
+        broadcast({ type: evtType, operation_id: op.operation_id, status: "sent", pin: op.pin });
+      }
+    }
     res.type("text/plain").send(`C:${command.id}:${command.command}\r\n`);
   } else {
     res.type("text/plain").send("OK");
@@ -503,10 +710,42 @@ app.post("/iclock/devicecmd", (req, res) => {
 
   const match = body.match(/ID=(\d+)&Return=(-?\d+)/);
   if (match) {
-    const id = match[1];
+    const cmdId = parseInt(match[1]);
     const ret = parseInt(match[2]);
-    db.prepare("UPDATE commands SET status = ? WHERE id = ?").run(ret === 0 ? 2 : 3, id);
-    broadcast({ type: "command_result", id, success: ret === 0 });
+    // Return ≥ 0 = success (N records). Negatives = error codes.
+    db.prepare("UPDATE commands SET status = ? WHERE id = ?").run(ret >= 0 ? 2 : 3, cmdId);
+    broadcast({ type: "command_result", id: cmdId, success: ret >= 0 });
+
+    // Resolve photo_op se este comando for rastreado.
+    const photoOp = db.prepare("SELECT * FROM photo_ops WHERE command_id=?").get(cmdId) as any;
+    if (photoOp) {
+      const isDeleteNotFound = ret === -2 && photoOp.op_type === "delete";
+      if (ret >= 0 || isDeleteNotFound) {
+        photoOpSetSuccess(photoOp.id, photoOp.pin, photoOp.operation_id);
+      } else if (ret === -1) {
+        db.prepare("UPDATE photo_ops SET status='critical', error_detail=?, updated_at=datetime('now') WHERE id=?")
+          .run("Return=-1 (comando não suportado)", photoOp.id);
+        broadcast({ type: "photo_op_update", operation_id: photoOp.operation_id, status: "critical", pin: photoOp.pin });
+      } else {
+        photoOpSetFailure(photoOp, `Return=${ret}`);
+      }
+    }
+
+    // Resolve user_op se este comando for rastreado.
+    const userOp = db.prepare("SELECT * FROM user_ops WHERE command_id=?").get(cmdId) as any;
+    if (userOp) {
+      const isDeleteNotFound = ret === -2 && userOp.op_type === "delete";
+      if (ret >= 0 || isDeleteNotFound) {
+        db.prepare("UPDATE user_ops SET status='success', updated_at=datetime('now') WHERE id=?").run(userOp.id);
+        broadcast({ type: "user_op_update", operation_id: userOp.operation_id, status: "success", pin: userOp.pin });
+      } else if (ret === -1) {
+        db.prepare("UPDATE user_ops SET status='critical', error_detail=?, updated_at=datetime('now') WHERE id=?")
+          .run("Return=-1 (comando não suportado)", userOp.id);
+        broadcast({ type: "user_op_update", operation_id: userOp.operation_id, status: "critical", pin: userOp.pin });
+      } else {
+        userOpSetFailure(userOp, `Return=${ret}`);
+      }
+    }
   }
 
   res.type("text/plain").send("OK");
@@ -531,14 +770,29 @@ app.get("/api/devices", (_req, res) => {
 });
 
 app.get("/api/users", (_req, res) => {
-  const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all() as any[];
+  const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path, photo_hash, photo_synced_at FROM users").all() as any[];
+  const latestOpRows = (table: string) => db.prepare(`
+    SELECT pin, status, operation_id, error_detail FROM ${table}
+    WHERE id IN (SELECT MAX(id) FROM ${table} GROUP BY pin)
+  `).all() as any[];
+  const photoOpByPin = new Map(latestOpRows("photo_ops").map((r: any) => [r.pin, r]));
+  const userOpByPin  = new Map(latestOpRows("user_ops").map((r: any) => [r.pin, r]));
+
   res.json(users.map(u => {
-    if (!u.photo_path) return u;
+    const pop = photoOpByPin.get(u.pin);
+    const uop = userOpByPin.get(u.pin);
+    const photoSync = u.photo_path
+      ? { status: pop?.status ?? "success", operation_id: pop?.operation_id ?? null, error_detail: pop?.error_detail ?? null }
+      : null;
+    const userSync = uop
+      ? { status: uop.status, operation_id: uop.operation_id, error_detail: uop.error_detail }
+      : null;
+    if (!u.photo_path) return { ...u, photoSync, userSync };
     try {
       const v = Math.floor(fs.statSync(path.join(PHOTOS_DIR, u.photo_path)).mtimeMs);
-      return { ...u, photo_url: `/photos/${u.photo_path}?v=${v}` };
+      return { ...u, photo_url: `/photos/${u.photo_path}?v=${v}`, photoSync, userSync };
     } catch {
-      return { ...u, photo_path: null };
+      return { ...u, photo_path: null, photoSync: null, userSync };
     }
   }));
 });
@@ -551,12 +805,10 @@ app.post("/api/users", express.json(), (req, res) => {
 
     const devices = db.prepare("SELECT sn FROM devices").all() as any[];
     for (const dev of devices) {
-      const cmd = `DATA UPDATE user Pin=${pin}\tName=${name}\tPrivilege=${privilege || 0}\tPassword=${password || ""}\tCardNo=${card || ""}\r\n`;
-      db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmd.trim());
-      const authCmd = `DATA UPDATE userauthorize Pin=${pin}\tAuthorizeTimezoneId=1\tAuthorizeDoorId=1\r\n`;
-      db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, authCmd.trim());
+      enqueueUserUpsert(dev.sn, pin, name, privilege || 0, password || "", card || "");
     }
 
+    broadcast({ type: "users_updated" });
     res.json({ success: true });
   } catch (e: any) {
     res.status(400).json({ error: e.message });
@@ -565,12 +817,11 @@ app.post("/api/users", express.json(), (req, res) => {
 
 app.delete("/api/users/:pin", (req, res) => {
   const { pin } = req.params;
-  db.prepare("DELETE FROM users WHERE pin = ?").run(pin);
+  db.prepare("DELETE FROM users WHERE pin=?").run(pin);
 
   const devices = db.prepare("SELECT sn FROM devices").all() as any[];
   for (const dev of devices) {
-    const cmd = `DATA DELETE user Pin=${pin}`;
-    db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(dev.sn, cmd);
+    enqueueUserDelete(dev.sn, pin);
   }
 
   res.json({ success: true });
@@ -586,15 +837,15 @@ app.post("/api/users/:pin/photo", photoUpload.single("photo"), async (req, res) 
     const optimized = await optimizeForRep(req.file.buffer);
     const filename = `${pin}.jpg`;
 
+    const hash = crypto.createHash("sha256").update(optimized).digest("hex");
     db.prepare("INSERT OR IGNORE INTO users (pin) VALUES (?)").run(pin);
-    db.prepare("UPDATE users SET photo_blob = ?, photo_path = ? WHERE pin = ?")
-      .run(optimized, filename, pin);
+    db.prepare("UPDATE users SET photo_blob=?, photo_path=?, photo_hash=?, photo_synced_at=NULL WHERE pin=?")
+      .run(optimized, filename, hash, pin);
     fs.writeFileSync(path.join(PHOTOS_DIR, filename), optimized);
 
     enqueuePhotoUpdate(pin, optimized);
 
-    const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all();
-    broadcast({ type: "users_updated", users });
+    broadcast({ type: "users_updated" });
     res.json({ success: true, size: optimized.length });
   } catch (e: any) {
     console.error("[ZK] photo upload error:", e);
@@ -602,14 +853,53 @@ app.post("/api/users/:pin/photo", photoUpload.single("photo"), async (req, res) 
   }
 });
 
+app.post("/api/users/:pin/photo/sync", (req, res) => {
+  const { pin } = req.params;
+  const user = db.prepare("SELECT photo_blob FROM users WHERE pin=?").get(pin) as any;
+  if (!user?.photo_blob) return res.status(404).json({ error: "Nenhuma foto no banco para este usuário" });
+  const jpeg = Buffer.from(user.photo_blob);
+  enqueuePhotoUpdate(pin, jpeg);
+  res.json({ success: true });
+});
+
 app.delete("/api/users/:pin/photo", (req, res) => {
   const { pin } = req.params;
-  db.prepare("UPDATE users SET photo_blob = NULL, photo_path = NULL WHERE pin = ?").run(pin);
+  db.prepare("UPDATE users SET photo_blob=NULL, photo_path=NULL, photo_hash=NULL, photo_synced_at=NULL WHERE pin=?").run(pin);
   try { fs.unlinkSync(path.join(PHOTOS_DIR, `${pin}.jpg`)); } catch {}
   enqueuePhotoDelete(pin);
-  const users = db.prepare("SELECT pin, name, privilege, password, card, photo_path FROM users").all();
-  broadcast({ type: "users_updated", users });
+  broadcast({ type: "users_updated" });
   res.json({ success: true });
+});
+
+// --- Photo Ops API ---
+
+app.get("/api/photo-ops", (req, res) => {
+  const { pin, status } = req.query;
+  let q = "SELECT id, operation_id, sn, pin, op_type, status, attempt_count, max_attempts, photo_hash, error_detail, next_retry_at, created_at, updated_at FROM photo_ops WHERE 1=1";
+  const params: any[] = [];
+  if (pin)    { q += " AND pin=?";    params.push(pin); }
+  if (status) { q += " AND status=?"; params.push(status); }
+  q += " ORDER BY id DESC LIMIT 100";
+  res.json(db.prepare(q).all(...params));
+});
+
+app.get("/api/photo-ops/metrics", (_req, res) => {
+  res.json(db.prepare(`
+    SELECT
+      COUNT(*) as total,
+      SUM(status='success') as total_success,
+      SUM(status IN ('error','pending')) as pending_ops,
+      SUM(status='critical') as total_critical,
+      ROUND(AVG(attempt_count), 2) as avg_attempts
+    FROM photo_ops
+  `).get());
+});
+
+app.post("/api/photo-ops/:opId/retry", (req, res) => {
+  const op = db.prepare("SELECT * FROM photo_ops WHERE operation_id=?").get(req.params.opId) as any;
+  if (!op) return res.status(404).json({ error: "Operação não encontrada" });
+  db.prepare("UPDATE photo_ops SET status='pending', next_retry_at=NULL, error_detail=NULL, updated_at=datetime('now') WHERE id=?").run(op.id);
+  res.json({ success: true, message: "Operação reenfileirada" });
 });
 
 app.get("/api/logs", (_req, res) => {

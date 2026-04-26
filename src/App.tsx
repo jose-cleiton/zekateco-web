@@ -40,6 +40,12 @@ interface Device {
   online: boolean;
 }
 
+interface PhotoSync {
+  status: "pending" | "sent" | "success" | "error" | "critical";
+  operation_id: string | null;
+  error_detail: string | null;
+}
+
 interface User {
   pin: string;
   name: string;
@@ -47,6 +53,8 @@ interface User {
   password?: string;
   card?: string;
   photo_url?: string;
+  photoSync?: PhotoSync | null;
+  userSync?: PhotoSync | null;
 }
 
 interface Log {
@@ -75,6 +83,7 @@ export default function App() {
   const [serverUrl, setServerUrl] = useState(window.location.origin);
   const [serverPort, setServerPort] = useState("");
   const [uploadingPin, setUploadingPin] = useState<string | null>(null);
+  const [syncingPin, setSyncingPin] = useState<string | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
 
@@ -126,6 +135,18 @@ export default function App() {
           setLogs((prev: Log[]) => [data.log, ...prev].slice(0, 100));
         } else if (data.type === "device_update" || data.type === "users_updated") {
           fetchData();
+        } else if (data.type === "photo_op_update") {
+          setUsers(prev => prev.map(u =>
+            u.pin === data.pin
+              ? { ...u, photoSync: { status: data.status, operation_id: data.operation_id, error_detail: data.error_detail ?? null } }
+              : u
+          ));
+        } else if (data.type === "user_op_update") {
+          setUsers(prev => prev.map(u =>
+            u.pin === data.pin
+              ? { ...u, userSync: { status: data.status, operation_id: data.operation_id, error_detail: data.error_detail ?? null } }
+              : u
+          ));
         }
       };
 
@@ -173,6 +194,21 @@ export default function App() {
       fetchData();
     } catch (error) {
       console.error("Error deleting user:", error);
+    }
+  };
+
+  const handlePhotoSync = async (pin: string) => {
+    setSyncingPin(pin);
+    try {
+      const res = await fetch(`/api/users/${pin}/photo/sync`, { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.error || "Erro ao sincronizar foto");
+      }
+    } catch {
+      alert("Falha de rede ao sincronizar foto");
+    } finally {
+      setSyncingPin(null);
     }
   };
 
@@ -408,6 +444,7 @@ export default function App() {
                   {users.map(user => (
                     <tr key={user.pin} className="hover:bg-slate-50/50 transition-colors group">
                       <td className="px-4 py-3">
+                        <div className="flex items-center gap-1.5">
                         <label
                           className="relative w-10 h-10 block cursor-pointer group/avatar"
                           title="Clique para enviar uma foto e sincronizar com o REP"
@@ -449,9 +486,70 @@ export default function App() {
                               <Loader2 size={16} className="animate-spin" />
                             </div>
                           )}
+                          {user.photo_url && user.photoSync && (() => {
+                            const s = user.photoSync!.status;
+                            if (s === "success") return (
+                              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-emerald-500 rounded-full border-2 border-white flex items-center justify-center" title="Sincronizado com o REP">
+                                <CheckCircle2 size={9} className="text-white" />
+                              </span>
+                            );
+                            if (s === "pending" || s === "sent") return (
+                              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-amber-400 rounded-full border-2 border-white flex items-center justify-center" title="Sincronizando...">
+                                <Loader2 size={9} className="text-white animate-spin" />
+                              </span>
+                            );
+                            if (s === "error") return (
+                              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-orange-500 rounded-full border-2 border-white flex items-center justify-center" title={`Aguardando retry: ${user.photoSync!.error_detail ?? ""}`}>
+                                <AlertCircle size={9} className="text-white" />
+                              </span>
+                            );
+                            if (s === "critical") return (
+                              <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-rose-600 rounded-full border-2 border-white flex items-center justify-center" title={`Falha crítica: ${user.photoSync!.error_detail ?? ""}`}>
+                                <XCircle size={9} className="text-white" />
+                              </span>
+                            );
+                            return null;
+                          })()}
                         </label>
+                        {user.photo_url && (
+                          <button
+                            onClick={() => handlePhotoSync(user.pin)}
+                            disabled={syncingPin === user.pin}
+                            className="p-1 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50"
+                            title="Reenviar foto do banco para o REP"
+                          >
+                            {syncingPin === user.pin
+                              ? <Loader2 size={13} className="animate-spin" />
+                              : <RefreshCw size={13} />}
+                          </button>
+                        )}
+                        </div>
                       </td>
-                      <td className="px-6 py-4 font-mono text-sm font-medium text-slate-600">{user.pin}</td>
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-1.5">
+                          <span className="font-mono text-sm font-medium text-slate-600">{user.pin}</span>
+                          {(() => {
+                            const s = user.userSync?.status;
+                            if (!s || s === "success") return null;
+                            if (s === "pending" || s === "sent") return (
+                              <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded-full" title="Enviando para o REP...">
+                                <Loader2 size={9} className="animate-spin" /> enviando
+                              </span>
+                            );
+                            if (s === "error") return (
+                              <span className="flex items-center gap-1 text-[10px] font-semibold text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded-full" title={user.userSync?.error_detail ?? "Aguardando retry"}>
+                                <AlertCircle size={9} /> retry
+                              </span>
+                            );
+                            if (s === "critical") return (
+                              <span className="flex items-center gap-1 text-[10px] font-semibold text-rose-600 bg-rose-50 px-1.5 py-0.5 rounded-full" title={user.userSync?.error_detail ?? "Falha crítica"}>
+                                <XCircle size={9} /> falhou
+                              </span>
+                            );
+                            return null;
+                          })()}
+                        </div>
+                      </td>
                       <td className="px-6 py-4 font-semibold text-slate-800">{user.name}</td>
                       <td className="px-6 py-4">
                         <span className={`text-xs px-2 py-1 rounded-md font-medium ${user.privilege === 14 ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'}`}>
@@ -481,7 +579,7 @@ export default function App() {
                 Logs de Acesso
               </h2>
             </div>
-            <div className="max-h-[400px] overflow-y-auto">
+            <div className="max-h-100 overflow-y-auto">
               <div className="divide-y divide-slate-100">
                 {logs.map((log, idx) => (
                   <motion.div
