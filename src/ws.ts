@@ -14,7 +14,7 @@ export function useWebSocket(onMessage: (msg: WSMessage) => void) {
     const connect = () => {
       if (stopped) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${protocol}//${window.location.host}`);
+      socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
 
       socket.onmessage = (event) => {
         try {
