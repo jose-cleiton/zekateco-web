@@ -17,7 +17,9 @@ import {
   Copy,
   Terminal,
   Camera,
-  Loader2
+  Loader2,
+  Pencil,
+  X
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { 
@@ -84,6 +86,7 @@ export default function App() {
   const [serverPort, setServerPort] = useState("");
   const [uploadingPin, setUploadingPin] = useState<string | null>(null);
   const [syncingPin, setSyncingPin] = useState<string | null>(null);
+  const [editingUser, setEditingUser] = useState<User | null>(null);
 
   const ws = useRef<WebSocket | null>(null);
 
@@ -187,13 +190,39 @@ export default function App() {
     }
   };
 
-  const handleDeleteUser = async (pin: string) => {
-    if (!confirm("Tem certeza que deseja excluir este usuário?")) return;
+  const handleDeleteUser = async (pin: string, name: string) => {
+    if (!confirm(`Excluir "${name}" (PIN ${pin})? Esta ação também remove o usuário do REP.`)) return;
     try {
       await fetch(`/api/users/${pin}`, { method: "DELETE" });
       fetchData();
     } catch (error) {
       console.error("Error deleting user:", error);
+    }
+  };
+
+  const handleEditUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingUser) return;
+    try {
+      const res = await fetch(`/api/users/${editingUser.pin}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: editingUser.name,
+          privilege: editingUser.privilege,
+          password: editingUser.password,
+          card: editingUser.card,
+        }),
+      });
+      if (res.ok) {
+        setEditingUser(null);
+        fetchData();
+      } else {
+        const err = await res.json();
+        alert(err.error);
+      }
+    } catch (error) {
+      console.error("Error editing user:", error);
     }
   };
 
@@ -558,12 +587,22 @@ export default function App() {
                       </td>
                       <td className="px-6 py-4 text-sm text-slate-500">{user.card || "-"}</td>
                       <td className="px-6 py-4 text-right">
-                        <button 
-                          onClick={() => handleDeleteUser(user.pin)}
-                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100"
-                        >
-                          <Trash2 size={18} />
-                        </button>
+                        <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button
+                            onClick={() => setEditingUser({ ...user })}
+                            className="p-2 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-all"
+                            title="Editar usuário"
+                          >
+                            <Pencil size={16} />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteUser(user.pin, user.name)}
+                            className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
+                            title="Excluir usuário"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -705,6 +744,97 @@ export default function App() {
                     className="flex-1 px-4 py-3 bg-indigo-600 text-white rounded-2xl font-bold hover:bg-indigo-700 transition-all shadow-lg shadow-indigo-200"
                   >
                     Salvar Usuário
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit User Modal */}
+      <AnimatePresence>
+        {editingUser && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setEditingUser(null)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden"
+            >
+              <div className="p-6 border-b border-slate-100 bg-slate-800 text-white flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold">Editar Usuário</h3>
+                  <p className="text-slate-300 text-sm font-mono">PIN {editingUser.pin}</p>
+                </div>
+                <button onClick={() => setEditingUser(null)} className="p-2 hover:bg-white/10 rounded-xl transition-colors">
+                  <X size={20} />
+                </button>
+              </div>
+              <form onSubmit={handleEditUser} className="p-6 space-y-4">
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-500 uppercase">Nome Completo</label>
+                  <input
+                    required
+                    type="text"
+                    value={editingUser.name}
+                    onChange={e => setEditingUser({ ...editingUser, name: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-500 uppercase">Privilégio</label>
+                    <select
+                      value={editingUser.privilege}
+                      onChange={e => setEditingUser({ ...editingUser, privilege: parseInt(e.target.value) })}
+                      className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                    >
+                      <option value={0}>Usuário Comum</option>
+                      <option value={14}>Administrador</option>
+                    </select>
+                  </div>
+                  <div className="space-y-1.5">
+                    <label className="text-xs font-bold text-slate-500 uppercase">Senha</label>
+                    <input
+                      type="password"
+                      value={editingUser.password ?? ""}
+                      onChange={e => setEditingUser({ ...editingUser, password: e.target.value })}
+                      className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                      placeholder="Deixe em branco para manter"
+                    />
+                  </div>
+                </div>
+                <div className="space-y-1.5">
+                  <label className="text-xs font-bold text-slate-500 uppercase">Cartão RFID</label>
+                  <input
+                    type="text"
+                    value={editingUser.card ?? ""}
+                    onChange={e => setEditingUser({ ...editingUser, card: e.target.value })}
+                    className="w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none transition-all"
+                    placeholder="ID do cartão"
+                  />
+                </div>
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingUser(null)}
+                    className="flex-1 px-4 py-3 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="submit"
+                    className="flex-1 px-4 py-3 bg-slate-800 text-white rounded-2xl font-bold hover:bg-slate-900 transition-all shadow-lg shadow-slate-200"
+                  >
+                    Salvar Alterações
                   </button>
                 </div>
               </form>

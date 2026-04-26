@@ -576,6 +576,9 @@ function enqueueUserUpsert(sn: string, pin: string, name: string, privilege: num
   const authCmd = `DATA UPDATE userauthorize Pin=${pin}\tAuthorizeTimezoneId=1\tAuthorizeDoorId=1`;
   db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, cmd);
   const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, authCmd);
+  // Verificação pós-operação: força o REP a devolver a lista atualizada,
+  // confirmando que o usuário foi aplicado e mantendo o banco em sincronia.
+  db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, "DATA QUERY tablename=user,fielddesc=*,filter=*");
   db.prepare("INSERT INTO user_ops (operation_id, sn, pin, op_type, command_id) VALUES (?,?,?,'upsert',?)")
     .run(opId, sn, pin, r.lastInsertRowid);
   return opId;
@@ -586,6 +589,8 @@ function enqueueUserDelete(sn: string, pin: string): string {
   const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, `DATA DELETE user Pin=${pin}`);
   db.prepare("INSERT INTO user_ops (operation_id, sn, pin, op_type, command_id) VALUES (?,?,?,'delete',?)")
     .run(opId, sn, pin, r.lastInsertRowid);
+  // Verificação pós-delete: confirma remoção e sincroniza lista.
+  db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(sn, "DATA QUERY tablename=user,fielddesc=*,filter=*");
   return opId;
 }
 
@@ -664,11 +669,13 @@ setInterval(() => {
       const auth = `DATA UPDATE userauthorize Pin=${op.pin}\tAuthorizeTimezoneId=1\tAuthorizeDoorId=1`;
       db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, cmd);
       const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, auth);
+      db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, "DATA QUERY tablename=user,fielddesc=*,filter=*");
       db.prepare("UPDATE user_ops SET command_id=?, attempt_count=attempt_count+1, status='pending', next_retry_at=NULL, updated_at=datetime('now') WHERE id=?")
         .run(r.lastInsertRowid, op.id);
       broadcast({ type: "user_op_update", operation_id: op.operation_id, status: "pending", pin: op.pin });
     } else {
       const r = db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, `DATA DELETE user Pin=${op.pin}`);
+      db.prepare("INSERT INTO commands (sn, command) VALUES (?, ?)").run(op.sn, "DATA QUERY tablename=user,fielddesc=*,filter=*");
       db.prepare("UPDATE user_ops SET command_id=?, attempt_count=attempt_count+1, status='pending', next_retry_at=NULL, updated_at=datetime('now') WHERE id=?")
         .run(r.lastInsertRowid, op.id);
       broadcast({ type: "user_op_update", operation_id: op.operation_id, status: "pending", pin: op.pin });
@@ -813,6 +820,25 @@ app.post("/api/users", express.json(), (req, res) => {
   } catch (e: any) {
     res.status(400).json({ error: e.message });
   }
+});
+
+app.put("/api/users/:pin", express.json(), (req, res) => {
+  const { pin } = req.params;
+  const { name, privilege, password, card } = req.body;
+  const existing = db.prepare("SELECT pin FROM users WHERE pin=?").get(pin);
+  if (!existing) return res.status(404).json({ error: "Usuário não encontrado" });
+
+  db.prepare(`
+    UPDATE users SET name=?, privilege=?, password=?, card=? WHERE pin=?
+  `).run(name, privilege ?? 0, password ?? "", card ?? "", pin);
+
+  const devices = db.prepare("SELECT sn FROM devices").all() as any[];
+  for (const dev of devices) {
+    enqueueUserUpsert(dev.sn, pin, name, privilege ?? 0, password ?? "", card ?? "");
+  }
+
+  broadcast({ type: "users_updated" });
+  res.json({ success: true });
 });
 
 app.delete("/api/users/:pin", (req, res) => {
