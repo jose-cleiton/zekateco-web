@@ -43,15 +43,15 @@ interface Props {
   onSyncPhoto?: () => void;
 }
 
+const Field = ({ label, children }: { label: string; children: ReactNode }) => (
+  <div>
+    <label className="label">{label}</label>
+    {children}
+  </div>
+);
+
 export function UserForm({ value, onChange, mode, photoUrl, onPickPhoto, onDeletePhoto, onSyncPhoto }: Props) {
   const set = (k: keyof UserFormValue, v: string | number) => onChange({ ...value, [k]: v });
-
-  const Field = ({ label, children }: { label: string; children: ReactNode }) => (
-    <div>
-      <label className="label">{label}</label>
-      {children}
-    </div>
-  );
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-[1fr_1fr_260px] gap-x-8 gap-y-3">
