@@ -25,6 +25,7 @@ model Device {
   alias     String?   @db.VarChar(255)
   last_seen DateTime?
   ip        String?   @db.VarChar(64)
+  locked    Boolean   @default(true)
 
   @@map("devices")
 }

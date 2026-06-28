@@ -55,4 +55,22 @@ export const api = {
   async syncUsersFromDevice() {
     return jsonOrThrow(await fetch("/api/sync-users", { method: "POST" }));
   },
+
+  async setDeviceOptions(sn: string, options: Record<string, string | number>) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/options`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(options),
+    }));
+  },
+  async rebootDevice(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/reboot`, { method: "POST" }));
+  },
+  async lockDevice(sn: string, locked: boolean) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/lock`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ locked }),
+    }));
+  },
 };

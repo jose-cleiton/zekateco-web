@@ -169,10 +169,15 @@ setInterval(async () => {
 async function queueInitialCommands(sn: string) {
   const pending = await prisma.command.count({ where: { sn, status: 0 } });
   if (pending === 0) {
+    // Reaplica o estado de bloqueio salvo. Útil quando o REP foi resetado
+    // ou perdeu config: garantimos que tap-to-wake bate com devices.locked.
+    const device = await prisma.device.findUnique({ where: { sn } });
+    const v = (device?.locked ?? true) ? 1 : 0;
     await prisma.command.createMany({
       data: [
         { sn, command: "DATA QUERY tablename=user,fielddesc=*,filter=*" },
         { sn, command: "SET OPTIONS FVInterval=7" },
+        { sn, command: `SET OPTIONS OpenTouchWakeUp=${v},TouchWakeUp=${v}` },
       ],
     });
   }
@@ -301,6 +306,15 @@ app.post("/iclock/cdata", async (req, res) => {
   } else if (t === "OPERLOG") {
     debugDump(SN as string, "cdata-OPERLOG", body);
     console.log(`[ZK] OperLog from ${SN} (${body.length} bytes)`);
+    // Captura completa da lista de capabilities (parametros expostos pelo firmware)
+    // sem truncamento, em arquivo dedicado por SN, util pra descobrir chaves
+    // de SET OPTIONS proprietarias do modelo.
+    if (/^~DeviceName=|,FaceFunOn=/.test(body)) {
+      try {
+        fs.writeFileSync(path.join(PHOTOS_DIR, `_caps_${SN}.txt`), body);
+        console.log(`[ZK] caps dump saved for SN=${SN} (${body.length} bytes)`);
+      } catch {}
+    }
     const photoLines = body.split("\n").filter(l => /^(USERPIC|BIOPHOTO|userpic|biophoto)\b/.test(l.trim()));
     if (photoLines.length > 0) {
       const kind = /^biophoto|^BIOPHOTO/.test(photoLines[0].trim()) ? "biophoto" : "userpic";
@@ -326,6 +340,14 @@ app.post("/iclock/cdata", async (req, res) => {
   } else {
     debugDump(SN as string, `cdata-unknown-${t}`, body);
     console.log(`[ZK] cdata POST unknown table: ${t}, body: ${body?.slice(0, 200)}`);
+    // Lista de capabilities do REP vem em table=options. Capturamos sem truncar
+    // pra descobrir chaves SET OPTIONS proprietarias do firmware.
+    if (t === "options" || /^~DeviceName=|,FaceFunOn=/.test(body || "")) {
+      try {
+        fs.writeFileSync(path.join(PHOTOS_DIR, `_caps_${SN}.txt`), body || "");
+        console.log(`[ZK] caps dump saved for SN=${SN} (${(body || "").length} bytes)`);
+      } catch {}
+    }
   }
 
   res.type("text/plain").send("OK");
@@ -899,6 +921,58 @@ app.get("/api/devices", async (_req, res) => {
     online: d.last_seen ? now - d.last_seen.getTime() < threshold : false,
   }));
   res.json(result);
+});
+
+// Enfileira SET OPTIONS <chave>=<valor> para o REP. O resultado real
+// (Return=N do devicecmd) aparece nos logs do backend após o REP processar.
+app.post("/api/devices/:sn/options", express.json(), async (req, res) => {
+  const { sn } = req.params;
+  const options = (req.body || {}) as Record<string, string | number>;
+  if (!sn || Object.keys(options).length === 0) {
+    return res.status(400).json({ error: "Informe ao menos uma opção" });
+  }
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+
+  const created: { id: number; command: string }[] = [];
+  for (const [key, value] of Object.entries(options)) {
+    const command = `SET OPTIONS ${key}=${value}`;
+    const c = await prisma.command.create({ data: { sn, command } });
+    created.push({ id: c.id, command });
+  }
+  res.json({ success: true, queued: created });
+});
+
+// Bloqueia/desbloqueia a verificação biométrica do REP.
+// locked=true → ativa modo "tap to wake": camera/verificação dorme até toque na tela.
+// locked=false → desativa, REP volta a reconhecer continuamente.
+// As chaves OpenTouchWakeUp/TouchWakeUp são proprietárias do SenseFace 7A; só
+// surtem efeito após reboot do REP, então enfileiramos CONTROL DEVICE em seguida.
+app.post("/api/devices/:sn/lock", express.json(), async (req, res) => {
+  const { sn } = req.params;
+  const locked = !!req.body?.locked;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+
+  await prisma.device.update({ where: { sn }, data: { locked } });
+  const v = locked ? 1 : 0;
+  const setCmd = await prisma.command.create({
+    data: { sn, command: `SET OPTIONS OpenTouchWakeUp=${v},TouchWakeUp=${v}` },
+  });
+  const rebootCmd = await prisma.command.create({
+    data: { sn, command: "CONTROL DEVICE 03000000" },
+  });
+  broadcast({ type: "device_update", sn });
+  res.json({ success: true, locked, commandIds: [setCmd.id, rebootCmd.id] });
+});
+
+// Reinicia o REP via comando REBOOT.
+app.post("/api/devices/:sn/reboot", async (req, res) => {
+  const { sn } = req.params;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  const c = await prisma.command.create({ data: { sn, command: "REBOOT" } });
+  res.json({ success: true, commandId: c.id });
 });
 
 app.get("/api/users", async (_req, res) => {

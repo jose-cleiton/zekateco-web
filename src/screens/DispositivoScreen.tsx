@@ -1,8 +1,9 @@
-import { Hash, Cpu, Globe, Wifi, Clock, Volume2, Moon, ScanFace, KeyRound, RotateCcw, RefreshCw, Loader2, Check } from "lucide-react";
+import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
 import type { Device } from "../types";
 import { api } from "../api";
+import { RepLockCard } from "../components/common/RepLockCard";
 
 interface Props {
   device: Device | null;
@@ -23,8 +24,11 @@ const SettingRow = ({ icon: Icon, label, hint, control }: { icon: any; label: st
 
 export function DispositivoScreen({ device, serverPort, refresh }: Props) {
   const isOnline = device?.online ?? false;
+  const sn = device?.sn;
   const [syncState, setSyncState] = useState<"idle" | "sending" | "waiting" | "done" | "error">("idle");
   const [syncMessage, setSyncMessage] = useState<string>("");
+  const [rebootState, setRebootState] = useState<"idle" | "sending" | "done" | "error">("idle");
+  const [rebootMessage, setRebootMessage] = useState<string>("");
 
   const onSyncDevices = async () => {
     setSyncState("sending");
@@ -49,10 +53,31 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
     }
   };
 
+  const onReboot = async () => {
+    if (!sn) return;
+    if (!confirm(`Reiniciar o REP ${sn}? O dispositivo ficará offline por alguns segundos.`)) return;
+    setRebootState("sending");
+    setRebootMessage("Enviando REBOOT...");
+    try {
+      await api.rebootDevice(sn);
+      setRebootState("done");
+      setRebootMessage("REBOOT enfileirado");
+      setTimeout(() => { setRebootState("idle"); setRebootMessage(""); }, 4000);
+    } catch (e: any) {
+      setRebootState("error");
+      setRebootMessage(e.message || "Erro");
+      setTimeout(() => { setRebootState("idle"); setRebootMessage(""); }, 4000);
+    }
+  };
+
   const isSyncing = syncState === "sending" || syncState === "waiting";
 
   return (
     <div className="p-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <div className="xl:col-span-2">
+        <RepLockCard device={device} />
+      </div>
+
       <div className="up-card p-5">
         <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white mb-3">Identificação</h3>
         <SettingRow icon={Hash} label="Número de série" control={<span className="font-mono tabular text-[13px]">{device?.sn || "—"}</span>} />
@@ -79,15 +104,19 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
       <div className="up-card p-5">
         <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white mb-3">Servidor</h3>
         <SettingRow icon={Globe} label="Porta ADMS" control={<span className="font-mono tabular text-[13px]">{serverPort || "—"}</span>} />
-        <SettingRow icon={Volume2} label="Volume do alto-falante" hint="(somente UI)"
-          control={<input type="range" min={0} max={100} defaultValue={70} className="w-40 accent-up-500" disabled />} />
-        <SettingRow icon={Moon} label="Modo descanso" hint="(somente UI)"
-          control={<input type="checkbox" defaultChecked className="w-4 h-4 accent-up-500" disabled />} />
-        <SettingRow icon={ScanFace} label="Distância mínima de face" hint="(somente UI)" control={
-          <select className="field w-32" disabled><option>30 cm</option></select>
-        } />
-        <SettingRow icon={KeyRound} label="Senha de administração" hint="(somente UI)" control={<button className="btn-outline" disabled>Alterar</button>} />
-        <SettingRow icon={RotateCcw} label="Reiniciar dispositivo" hint="(somente UI)" control={<button className="btn-outline" disabled>Reiniciar</button>} />
+        <SettingRow icon={RotateCcw} label="Reiniciar dispositivo"
+          hint={rebootMessage || "Envia comando REBOOT ao REP"}
+          control={
+            <button
+              className="btn-outline inline-flex items-center gap-1.5"
+              onClick={onReboot}
+              disabled={!isOnline || rebootState === "sending"}
+            >
+              {rebootState === "sending" && <Loader2 size={12} className="animate-spin" />}
+              {rebootState === "done" && <Check size={12} className="text-emerald-600" />}
+              {rebootState === "sending" ? "Enviando..." : rebootState === "done" ? "Enfileirado" : "Reiniciar"}
+            </button>
+          } />
       </div>
     </div>
   );
