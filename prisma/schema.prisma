@@ -30,19 +30,34 @@ model Device {
 }
 
 model User {
-  pin             String    @id @db.VarChar(32)
-  name            String?   @db.VarChar(255)
-  privilege       Int       @default(0)
-  password        String?   @db.VarChar(255)
-  card            String?   @db.VarChar(64)
-  group_id        Int       @default(1)
-  photo_path      String?   @db.VarChar(512)
-  photo_blob      Bytes?    @db.LongBlob
-  photo_hash      String?   @db.VarChar(128)
+  pin             String       @id @db.VarChar(32)
+  name            String?      @db.VarChar(255)
+  privilege       Int          @default(0)
+  password        String?      @db.VarChar(255)
+  card            String?      @db.VarChar(64)
+  group_id        Int          @default(1)
+  photo_path      String?      @db.VarChar(512)
+  photo_blob      Bytes?       @db.LongBlob
+  photo_hash      String?      @db.VarChar(128)
   photo_synced_at DateTime?
-  soltech_user_id String?   @db.VarChar(64)
+  soltech_user_id String?      @db.VarChar(64)
+  last_synced_at  DateTime?
+  devices         UserDevice[]
 
   @@map("users")
+}
+
+// Liga cada usuário ao(s) REP(s) que o reportou via querydata/cdata.
+// Permite responder "quais usuários estão no REP X" e "quais são órfãos".
+model UserDevice {
+  pin            String   @db.VarChar(32)
+  sn             String   @db.VarChar(64)
+  last_synced_at DateTime @default(now()) @updatedAt
+  user           User     @relation(fields: [pin], references: [pin], onDelete: Cascade)
+
+  @@id([pin, sn])
+  @@index([sn])
+  @@map("user_devices")
 }
 
 model Log {

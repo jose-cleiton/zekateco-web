@@ -199,12 +199,12 @@ app.post("/iclock/registry", async (req, res) => {
   }
 
   const ip = (req.headers["x-forwarded-for"] as string) || req.ip || "";
-  const isNew = !(await prisma.device.findUnique({ where: { sn: SN as string } }));
   await updateDeviceSeen(SN as string, ip, req);
 
-  if (isNew) {
-    await queueInitialCommands(SN as string);
-  }
+  // Sempre que o REP faz registry (reboot, reconexão), garantimos uma sync completa
+  // de usuários. queueInitialCommands só enfileira se a fila estiver vazia, então
+  // não duplica caso já tenha comandos pendentes.
+  await queueInitialCommands(SN as string);
 
   res.type("text/plain").send(`RegistryCode=REP_${SN}_abcd79\n`);
 });
@@ -343,7 +343,10 @@ app.post("/iclock/querydata", async (req, res) => {
   debugDump(SN as string, `querydata-${tablename}`, `[CT=${ct}][CL=${cl}][URL=${req.originalUrl}]\n${body || "<empty>"}`);
 
   if (tablename === "user") {
-    await parseAndSaveUsers(SN as string, body, "querydata-user");
+    const packidx = parseInt(req.query.packidx as string) || 1;
+    const packcnt = parseInt(req.query.packcnt as string) || 1;
+    if (packidx === 1) userSyncSessions.set(SN as string, new Date());
+    await parseAndSaveUsers(SN as string, body, "querydata-user", packidx === packcnt);
   } else if (tablename === "userpic" || tablename === "biophoto") {
     await parseAndSavePhotos(SN as string, body, tablename as string, `querydata-${tablename}`);
   } else if (tablename === "transaction") {
@@ -370,7 +373,24 @@ app.post("/iclock/querydata", async (req, res) => {
   res.type("text/plain").send("OK");
 });
 
-async function parseAndSaveUsers(sn: string, body: string, source: string) {
+// Rastreia início de cada sessão de sync completa (DATA QUERY tablename=user paginado).
+// Quando o último pacote chega, deletamos vínculos antigos e usuários órfãos.
+const userSyncSessions = new Map<string, Date>();
+
+async function pruneStaleUsersForSn(sn: string, syncStart: Date) {
+  const removedLinks = await prisma.userDevice.deleteMany({
+    where: { sn, last_synced_at: { lt: syncStart } },
+  });
+  const orphans = await prisma.$executeRaw`
+    DELETE FROM users WHERE pin NOT IN (SELECT pin FROM user_devices)
+  `;
+  console.log(`[ZK] prune SN=${sn}: removed ${removedLinks.count} stale links, ${orphans} orphan users`);
+  if (removedLinks.count > 0 || orphans > 0) {
+    broadcast({ type: "users_updated" });
+  }
+}
+
+async function parseAndSaveUsers(sn: string, body: string, source: string, isFinalPacket = false) {
   const lines = body.split("\n");
   let count = 0;
   for (const line of lines) {
@@ -402,16 +422,30 @@ async function parseAndSaveUsers(sn: string, body: string, source: string) {
     const card = data.card || data.cardno || "";
 
     if (pin) {
+      const now = new Date();
       await prisma.user.upsert({
         where: { pin },
-        create: { pin, name, privilege, password, card },
-        update: { name, privilege, password, card },
+        create: { pin, name, privilege, password, card, last_synced_at: now },
+        update: { name, privilege, password, card, last_synced_at: now },
+      });
+      await prisma.userDevice.upsert({
+        where: { pin_sn: { pin, sn } },
+        create: { pin, sn },
+        update: { last_synced_at: now },
       });
       count++;
     }
   }
   console.log(`[ZK] ${source}: saved ${count} users from SN=${sn}`);
   broadcast({ type: "users_updated" });
+
+  if (isFinalPacket) {
+    const syncStart = userSyncSessions.get(sn);
+    userSyncSessions.delete(sn);
+    if (syncStart) {
+      await pruneStaleUsersForSn(sn, syncStart);
+    }
+  }
 }
 
 async function parseAndSavePhotos(sn: string, body: string, kind: string, source: string): Promise<number> {
@@ -455,10 +489,16 @@ async function parseAndSavePhotos(sn: string, body: string, kind: string, source
       if (s3) {
         try { await s3Upload(pin, buf); } catch (e) { console.error(`[S3] upload pin=${pin} error:`, e); }
       }
+      const now = new Date();
       await prisma.user.upsert({
         where: { pin },
-        create: { pin, photo_path: s3 ? s3Key(pin) : filename, photo_blob: buf },
-        update: { photo_path: s3 ? s3Key(pin) : filename, photo_blob: buf },
+        create: { pin, photo_path: s3 ? s3Key(pin) : filename, photo_blob: buf, last_synced_at: now },
+        update: { photo_path: s3 ? s3Key(pin) : filename, photo_blob: buf, last_synced_at: now },
+      });
+      await prisma.userDevice.upsert({
+        where: { pin_sn: { pin, sn } },
+        create: { pin, sn },
+        update: { last_synced_at: now },
       });
     }
     console.log(`[ZK]   pin=${pin} ${same ? "(unchanged)" : "saved"} ${buf.length}B → ${filename}`);
@@ -866,6 +906,8 @@ app.get("/api/users", async (_req, res) => {
     select: {
       pin: true, name: true, privilege: true, password: true, card: true,
       photo_path: true, photo_hash: true, photo_synced_at: true, soltech_user_id: true,
+      last_synced_at: true,
+      devices: { select: { sn: true, last_synced_at: true } },
     },
   });
   // Subquery MAX(id) GROUP BY pin — Prisma não tem equivalente direto.

@@ -41,6 +41,8 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     volumes:
       - photos_data:/app/photos
+    ports:
+      - "3000:3000" # acesso direto ao backend p/ REP apontar enquanto o gateway Soltech nao esta no ar
     depends_on:
       db:
         condition: service_healthy
@@ -55,7 +57,7 @@ services:
     restart: unless-stopped
     ports:
       - "81:80" # dashboard local: 80 do host esta ocupado, mantemos 81
-      - "8080:8080" # gateway ADMS: REP aponta aqui; nginx faz mirror para Soltech + zekateco backend
+      - "8090:8080" # gateway ADMS: REP aponta aqui; nginx faz mirror para Soltech + zekateco backend (host 8090 evita conflito com ultraponto-api)
     depends_on:
       - backend
     networks:
