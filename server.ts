@@ -966,6 +966,151 @@ app.post("/api/devices/:sn/lock", express.json(), async (req, res) => {
   res.json({ success: true, locked, commandIds: [setCmd.id, rebootCmd.id] });
 });
 
+// Otimiza imagem (wallpaper/promotion) pra caber no command do ADMS sem
+// estourar buffer. Resolução típica 480x800 (face REPs verticais).
+async function optimizeForRepMedia(input: Buffer, maxKB = 200): Promise<Buffer> {
+  let q = 85;
+  let out = await sharp(input)
+    .resize(480, 800, { fit: "cover", position: "center" })
+    .jpeg({ quality: q })
+    .toBuffer();
+  while (out.length > maxKB * 1024 && q > 30) {
+    q -= 10;
+    out = await sharp(input)
+      .resize(480, 800, { fit: "cover", position: "center" })
+      .jpeg({ quality: q })
+      .toBuffer();
+  }
+  return out;
+}
+
+const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
+
+// Enfileira upload de adpic com DELETE prévio do mesmo slot, garantindo
+// substituição limpa quando o REP já tem imagem no índice.
+async function enqueueAdpic(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
+  await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${index}` } });
+  const content = buf.toString("base64");
+  const c = await prisma.command.create({
+    data: { sn, command: `DATA UPDATE adpic index=${index}\tsize=${buf.length}\textension=${ext}\tcontent=${content}` },
+  });
+  return c;
+}
+
+// Lista as imagens (adpics) cadastradas pra um REP. Cada item inclui um thumbnail
+// inline em base64 pra preview no dashboard sem requisição extra.
+app.get("/api/devices/:sn/media", async (req, res) => {
+  const { sn } = req.params;
+  const items = await prisma.deviceMedia.findMany({
+    where: { sn },
+    orderBy: { idx: "asc" },
+    select: { idx: true, size: true, ext: true, thumbnail: true, created_at: true },
+  });
+  res.json(items.map((m) => ({
+    idx: m.idx,
+    sizeKB: Math.round(m.size / 1024),
+    ext: m.ext,
+    created_at: m.created_at.toISOString(),
+    thumbnail: m.thumbnail
+      ? `data:image/jpeg;base64,${m.thumbnail.toString("base64")}`
+      : null,
+  })));
+});
+
+// Envia uma imagem nova pro slideshow do REP. Se index não vier no body,
+// usa o próximo livre. Otimiza com sharp pra <=300KB JPEG e gera um thumbnail
+// pequeno (<=15KB) pra preview no dashboard.
+app.post("/api/devices/:sn/media", mediaUpload.single("image"), async (req, res) => {
+  const { sn } = req.params;
+  if (!req.file) return res.status(400).json({ error: "Imagem não enviada (campo 'image')" });
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+
+  try {
+    // Determina próximo idx livre se nenhum foi informado.
+    let idx = parseInt((req.body?.index as string) || "0") || 0;
+    if (!idx) {
+      const used = await prisma.deviceMedia.findMany({ where: { sn }, select: { idx: true } });
+      const set = new Set(used.map((u) => u.idx));
+      for (let i = 1; i <= 100; i++) {
+        if (!set.has(i)) { idx = i; break; }
+      }
+    }
+
+    const mime = req.file.mimetype || "";
+    const ext: "jpg" | "png" = mime.includes("png") ? "png" : "jpg";
+    const out = ext === "png"
+      ? await sharp(req.file.buffer).png({ compressionLevel: 9 }).toBuffer()
+      : await optimizeForRepMedia(req.file.buffer, 300);
+
+    // Thumb pequeno (~96x160) pra preview no dashboard.
+    const thumb = await sharp(req.file.buffer)
+      .resize(96, 160, { fit: "cover", position: "center" })
+      .jpeg({ quality: 70 })
+      .toBuffer();
+
+    const c = await enqueueAdpic(sn, idx, out, ext);
+    await prisma.deviceMedia.upsert({
+      where: { sn_idx: { sn, idx } },
+      create: { sn, idx, size: out.length, ext, thumbnail: thumb },
+      update: { size: out.length, ext, thumbnail: thumb, created_at: new Date() },
+    });
+    console.log(`[ZK] media queued: cmd=${c.id} sn=${sn} idx=${idx} ext=${ext} bytes=${out.length}`);
+    res.json({ success: true, commandId: c.id, idx, sizeKB: Math.round(out.length / 1024), ext });
+  } catch (e: any) {
+    console.error("[ZK] media error:", e);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Remove uma imagem específica do REP por índice.
+app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
+  const { sn } = req.params;
+  const idx = parseInt(req.params.idx);
+  if (!idx) return res.status(400).json({ error: "Índice inválido" });
+  await prisma.deviceMedia.deleteMany({ where: { sn, idx } });
+  const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${idx}` } });
+  res.json({ success: true, commandId: c.id });
+});
+
+// Apaga TODOS os userpic (avatares dos usuários cadastrados) do REP.
+// O userpic é o que entra no slideshow do equipamento quando ele fica ocioso —
+// é distinto do BIOPHOTO/template usado pra reconhecer face, então deletar
+// userpic NÃO quebra a autenticação biométrica.
+app.post("/api/devices/:sn/userpics/clear", async (req, res) => {
+  const { sn } = req.params;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  // 1) Wildcard global (alguns firmwares aceitam).
+  const cmds: number[] = [];
+  const wildcard = await prisma.command.create({ data: { sn, command: "DATA DELETE userpic pin=*" } });
+  cmds.push(wildcard.id);
+  // 2) Por PIN conhecido (fallback robusto).
+  const links = await prisma.userDevice.findMany({ where: { sn }, select: { pin: true } });
+  for (const { pin } of links) {
+    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE userpic pin=${pin}` } });
+    cmds.push(c.id);
+  }
+  res.json({ success: true, queued: cmds.length });
+});
+
+// Limpa todas as adpics do REP + apaga registros locais.
+app.post("/api/devices/:sn/media/clear", async (req, res) => {
+  const { sn } = req.params;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  await prisma.deviceMedia.deleteMany({ where: { sn } });
+  // Wildcard + 10 índices explícitos (nem todo firmware suporta o *).
+  const cmds: number[] = [];
+  const wildcard = await prisma.command.create({ data: { sn, command: "DATA DELETE adpic *" } });
+  cmds.push(wildcard.id);
+  for (let i = 1; i <= 10; i++) {
+    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${i}` } });
+    cmds.push(c.id);
+  }
+  res.json({ success: true, queued: cmds.length });
+});
+
 // Reinicia o REP via comando REBOOT.
 app.post("/api/devices/:sn/reboot", async (req, res) => {
   const { sn } = req.params;

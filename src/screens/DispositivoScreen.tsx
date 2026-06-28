@@ -1,5 +1,5 @@
-import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check } from "lucide-react";
-import { useState } from "react";
+import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check, Image as ImageIcon, Upload, Trash2, Plus, X } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import type { ReactNode } from "react";
 import type { Device } from "../types";
 import { api } from "../api";
@@ -72,6 +72,52 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
 
   const isSyncing = syncState === "sending" || syncState === "waiting";
 
+  type MediaItem = { idx: number; sizeKB: number; ext: string; created_at: string; thumbnail: string | null };
+  const mediaInput = useRef<HTMLInputElement>(null);
+  const [mediaList, setMediaList] = useState<MediaItem[]>([]);
+  const [mediaUploading, setMediaUploading] = useState(false);
+  const [mediaError, setMediaError] = useState<string>("");
+
+  const loadMedia = useCallback(async () => {
+    if (!sn) return;
+    try { setMediaList(await api.listDeviceMedia(sn)); }
+    catch (e: any) { setMediaError(e.message || "Erro ao carregar imagens"); }
+  }, [sn]);
+
+  useEffect(() => { loadMedia(); }, [loadMedia]);
+
+  const onPickMedia = () => mediaInput.current?.click();
+
+  const onMediaChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file || !sn) return;
+    setMediaUploading(true);
+    setMediaError("");
+    try {
+      await api.uploadDeviceMedia(sn, file);
+      await loadMedia();
+    } catch (err: any) {
+      setMediaError(err.message || "Erro ao enviar");
+    } finally {
+      setMediaUploading(false);
+    }
+  };
+
+  const onDeleteMedia = async (idx: number) => {
+    if (!sn) return;
+    if (!confirm(`Remover a imagem do slot ${idx}?`)) return;
+    try { await api.deleteDeviceMedia(sn, idx); await loadMedia(); }
+    catch (e: any) { setMediaError(e.message || "Erro ao remover"); }
+  };
+
+  const onClearMedia = async () => {
+    if (!sn) return;
+    if (!confirm("Apagar TODAS as imagens do slideshow do REP? (incluindo as de fábrica)")) return;
+    try { await api.clearDeviceMedia(sn); await loadMedia(); }
+    catch (e: any) { setMediaError(e.message || "Erro ao limpar"); }
+  };
+
   return (
     <div className="p-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
       <div className="xl:col-span-2">
@@ -117,6 +163,75 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
               {rebootState === "sending" ? "Enviando..." : rebootState === "done" ? "Enfileirado" : "Reiniciar"}
             </button>
           } />
+      </div>
+
+      <div className="up-card p-5 xl:col-span-2">
+        <div className="flex items-center mb-3 gap-2">
+          <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white flex-1">
+            Aparência do REP
+            <span className="ml-2 text-[12px] font-normal text-ink-500">{mediaList.length} {mediaList.length === 1 ? "imagem" : "imagens"}</span>
+          </h3>
+          <button
+            className="btn-soft inline-flex items-center gap-1.5 text-[12.5px]"
+            disabled={!isOnline || mediaUploading}
+            onClick={onPickMedia}
+          >
+            {mediaUploading ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />}
+            {mediaUploading ? "Enviando..." : "Adicionar imagem"}
+          </button>
+          <button
+            className="btn-outline inline-flex items-center gap-1.5 text-[12.5px]"
+            disabled={!isOnline || mediaList.length === 0}
+            onClick={onClearMedia}
+          >
+            <Trash2 size={12} /> Limpar todas
+          </button>
+          <button
+            className="btn-outline inline-flex items-center gap-1.5 text-[12.5px]"
+            disabled={!isOnline}
+            title="Remove os avatares dos usuários do slideshow do REP. O reconhecimento facial continua funcionando (template biophoto não é afetado)."
+            onClick={async () => {
+              if (!sn) return;
+              if (!confirm("Apagar os avatares dos usuários no slideshow do REP?\n\nO reconhecimento facial continua funcionando — só o avatar visual é removido.")) return;
+              try { const r: any = await api.clearDeviceUserpics(sn); alert(`${r.queued} comandos enfileirados. REP aplica em ~30s.`); }
+              catch (e: any) { alert(e.message || "Erro"); }
+            }}
+          >
+            <Trash2 size={12} /> Limpar avatares
+          </button>
+        </div>
+        <div className="text-[12px] text-ink-500 mb-3">
+          Imagens exibidas no slideshow quando o REP fica ocioso (modo "Registro ao toque" desativado). Cada upload vai para o próximo slot livre.
+        </div>
+        {mediaError && (
+          <div className="mb-2 p-2 rounded bg-red-50 border border-red-200 text-[12px] text-red-700">{mediaError}</div>
+        )}
+        {mediaList.length === 0 ? (
+          <div className="py-8 text-center text-[13px] text-ink-400 border border-dashed border-ink-200 dark:border-[#2A3140] rounded">
+            Nenhuma imagem cadastrada. Clique em "Adicionar imagem".
+          </div>
+        ) : (
+          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+            {mediaList.map((m) => (
+              <div key={m.idx} className="relative group rounded border border-ink-200 dark:border-[#222A36] overflow-hidden">
+                {m.thumbnail
+                  ? <img src={m.thumbnail} alt={`Slot ${m.idx}`} className="w-full h-32 object-cover" />
+                  : <div className="w-full h-32 bg-ink-100 dark:bg-[#1A2030] flex items-center justify-center text-ink-400"><ImageIcon size={20} /></div>}
+                <div className="absolute top-1 left-1 bg-black/60 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded">#{m.idx}</div>
+                <div className="absolute bottom-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">{m.sizeKB}KB</div>
+                <button
+                  onClick={() => onDeleteMedia(m.idx)}
+                  disabled={!isOnline}
+                  title="Remover esta imagem"
+                  className="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white rounded p-1 opacity-0 group-hover:opacity-100 transition disabled:opacity-50"
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+        <input type="file" ref={mediaInput} accept="image/*" className="hidden" onChange={onMediaChange} />
       </div>
     </div>
   );

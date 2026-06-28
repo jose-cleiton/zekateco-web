@@ -21,13 +21,32 @@ enum OpStatus {
 }
 
 model Device {
-  sn        String    @id @db.VarChar(64)
-  alias     String?   @db.VarChar(255)
+  sn        String        @id @db.VarChar(64)
+  alias     String?       @db.VarChar(255)
   last_seen DateTime?
-  ip        String?   @db.VarChar(64)
-  locked    Boolean   @default(true)
+  ip        String?       @db.VarChar(64)
+  locked    Boolean       @default(true)
+  media     DeviceMedia[]
 
   @@map("devices")
+}
+
+// Rastreia adpics enviadas ao REP por slot. Permite UI mostrar lista, deletar
+// individualmente e auto-atribuir próximo índice livre. O thumbnail é uma versão
+// pequena pra preview no dashboard sem refetch da imagem inteira.
+model DeviceMedia {
+  id         Int      @id @default(autoincrement())
+  sn         String   @db.VarChar(64)
+  idx        Int
+  size       Int
+  ext        String   @db.VarChar(8)
+  thumbnail  Bytes?   @db.MediumBlob
+  created_at DateTime @default(now())
+  device     Device   @relation(fields: [sn], references: [sn], onDelete: Cascade)
+
+  @@unique([sn, idx])
+  @@index([sn])
+  @@map("device_media")
 }
 
 model User {
@@ -76,7 +95,7 @@ model Log {
 model Command {
   id         Int      @id @default(autoincrement())
   sn         String?  @db.VarChar(64)
-  command    String?  @db.Text
+  command    String?  @db.MediumText
   status     Int      @default(0)
   created_at DateTime @default(now())
 

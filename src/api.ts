@@ -73,4 +73,22 @@ export const api = {
       body: JSON.stringify({ locked }),
     }));
   },
+  async listDeviceMedia(sn: string): Promise<{ idx: number; sizeKB: number; ext: string; created_at: string; thumbnail: string | null }[]> {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/media`));
+  },
+  async uploadDeviceMedia(sn: string, file: File, index?: number) {
+    const fd = new FormData();
+    fd.append("image", file);
+    if (index) fd.append("index", String(index));
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/media`, { method: "POST", body: fd }));
+  },
+  async deleteDeviceMedia(sn: string, idx: number) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/media/${idx}`, { method: "DELETE" }));
+  },
+  async clearDeviceMedia(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/media/clear`, { method: "POST" }));
+  },
+  async clearDeviceUserpics(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/userpics/clear`, { method: "POST" }));
+  },
 };

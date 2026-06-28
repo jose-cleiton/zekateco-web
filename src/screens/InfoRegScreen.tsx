@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Trash2, FileDown, FileUp, CalendarRange } from "lucide-react";
 import { DateRangeModal, type DateRange } from "../components/common/DateRangeModal";
+import { formatLogTime } from "../utils/format";
 import type { Log, User } from "../types";
 
 interface Props {
@@ -41,7 +42,7 @@ export function InfoRegScreen({ logs, users }: Props) {
         <table className="w-full border-collapse min-w-[900px]">
           <thead>
             <tr className="bg-up-500 text-white">
-              <th className="up-th text-left">Hora</th>
+              <th className="up-th text-left">Data e Hora</th>
               <th className="up-th text-left">ID</th>
               <th className="up-th text-left">Nome</th>
               <th className="up-th text-left">SN</th>
@@ -56,7 +57,7 @@ export function InfoRegScreen({ logs, users }: Props) {
               <tr><td colSpan={6} className="py-16 text-center text-ink-400 text-[13px]">No matching records found</td></tr>
             ) : rows.map(r => (
               <tr key={r.id} className="up-row border-b border-ink-200 dark:border-[#222A36]">
-                <td className="up-td font-mono tabular">{r.time}</td>
+                <td className="up-td font-mono tabular">{formatLogTime(r.time)}</td>
                 <td className="up-td font-mono tabular">{r.pin}</td>
                 <td className="up-td font-medium">{userByPin.get(r.pin) || `PIN ${r.pin}`}</td>
                 <td className="up-td font-mono">{r.sn}</td>
