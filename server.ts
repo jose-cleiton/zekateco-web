@@ -166,6 +166,28 @@ setInterval(async () => {
   }
 }, 15_000);
 
+// Safety-net de sincronização: a cada 5 min, enfileira DATA QUERY tablename=user
+// pros REPs vistos recentemente. Cobre casos em que o OPERLOG não disparou
+// (ex.: REP desconectou no meio de uma edição). Não duplica comando se já tem
+// um pendente do mesmo tipo na fila.
+setInterval(async () => {
+  const cutoff = new Date(Date.now() - 10 * 60 * 1000);
+  const devices = await prisma.device.findMany({
+    where: { last_seen: { gte: cutoff } },
+    select: { sn: true },
+  });
+  for (const { sn } of devices) {
+    const pending = await prisma.command.count({
+      where: { sn, status: 0, command: { startsWith: "DATA QUERY tablename=user" } },
+    });
+    if (pending === 0) {
+      await prisma.command.create({
+        data: { sn, command: "DATA QUERY tablename=user,fielddesc=*,filter=*" },
+      });
+    }
+  }
+}, 5 * 60 * 1000);
+
 async function queueInitialCommands(sn: string) {
   const pending = await prisma.command.count({ where: { sn, status: 0 } });
   if (pending === 0) {
@@ -320,8 +342,28 @@ app.post("/iclock/cdata", async (req, res) => {
       const kind = /^biophoto|^BIOPHOTO/.test(photoLines[0].trim()) ? "biophoto" : "userpic";
       await parseAndSavePhotos(SN as string, photoLines.join("\n"), kind, `cdata-OPERLOG-${kind}`);
     }
-  } else if (t === "USERINFO") {
-    await parseAndSaveUsers(SN as string, body, "cdata-USERINFO");
+    // Detecta operações administrativas no REP (criar/editar/deletar user, mudar
+    // config, etc) e enfileira uma resync. O firmware do SenseFace 7A não faz
+    // push de USERINFO quando o admin edita pelo menu físico, então usamos o
+    // OPERLOG como gatilho indireto. Conservador: dispara em qualquer OPLOG,
+    // o prune da resposta querydata-user cuida de adds/edits/deletes.
+    const hasOpLog = /^(OPLOG|USER|FP|FACE|FV)\b/m.test(body);
+    if (hasOpLog) {
+      const pending = await prisma.command.count({
+        where: { sn: SN as string, status: 0, command: { startsWith: "DATA QUERY tablename=user" } },
+      });
+      if (pending === 0) {
+        await prisma.command.create({
+          data: { sn: SN as string, command: "DATA QUERY tablename=user,fielddesc=*,filter=*" },
+        });
+        console.log(`[ZK] OPERLOG detectado em ${SN}, sync de usuários enfileirada`);
+      }
+    }
+  } else if (t === "USERINFO" || t === "user") {
+    // SenseFace 7A faz push em table=user (lowercase) ao editar/criar pelo menu;
+    // outras firmwares usam USERINFO. Tratamos ambos como atualização incremental
+    // de um único user — não é sync completo, então isFinalPacket=false (sem prune).
+    await parseAndSaveUsers(SN as string, body, `cdata-${t}`);
   } else if (t === "userpic" || t === "biophoto") {
     debugDump(SN as string, `cdata-${t}`, body);
     await parseAndSavePhotos(SN as string, body, t, `cdata-${t}`);
