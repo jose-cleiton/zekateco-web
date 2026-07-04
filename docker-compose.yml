@@ -39,6 +39,11 @@ services:
       AWS_REGION: ${AWS_REGION}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      # Modo read-only: em 1, o backend rejeita mutações /api com 501 e não
+      # enfileira comandos pro REP. Comandos ao REP continuam via Soltech.
+      READ_ONLY: ${READ_ONLY:-1}
+      # Deve ser o MESMO valor do ZEKATECO_MIRROR_SECRET no Soltech.
+      MIRROR_SECRET: ${MIRROR_SECRET}
     volumes:
       - photos_data:/app/photos
     ports:
@@ -47,8 +52,13 @@ services:
       db:
         condition: service_healthy
     networks:
-      - internal
-      - soltech # precisa resolver ultraponto-api pra rota /iclock/getrequest
+      internal:
+      # Alias na rede compartilhada: o Soltech envia o mirror por DNS Docker
+      # interno (ZEKATECO_MIRROR_URL=http://zekateco-backend:3000/__mirror),
+      # sem sair pra internet.
+      soltech:
+        aliases:
+          - zekateco-backend
 
   frontend:
     build:
