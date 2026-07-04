@@ -83,9 +83,14 @@ jobs:
 
       - name: Health check — ADMS gateway
         run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" "http://${VPS_HOST}:8090/iclock/cdata?SN=HEALTHCHECK" || echo "000")
-          echo "Gateway ADMS → HTTP $code"
-          if [ "$code" != "200" ]; then
-            echo "❌ Gateway ADMS não respondeu"
-            exit 1
-          fi
+          # Health check com SN vazio: valida que nginx roteia e backend
+          # responde, sem criar um device fake no banco (SN=HEALTHCHECK
+          # antes ficava cadastrado como REP e poluía a listagem).
+          for i in 1 2 3 4 5; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "http://${VPS_HOST}:8090/iclock/cdata" || echo "000")
+            echo "Tentativa $i → HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "❌ Gateway ADMS não respondeu 200 após 5 tentativas"
+          exit 1

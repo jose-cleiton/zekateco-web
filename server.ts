@@ -126,13 +126,29 @@ function debugDump(sn: string, label: string, body: string) {
   } catch {}
 }
 
+// SNs "de teste" que não devem virar devices no banco. Usados por health
+// checks do CI e testes locais. Bloqueia poluição da tabela devices.
+const IGNORED_SNS = /^(HEALTHCHECK|TEST|TESTE|PROBE|DEMO)/i;
+
 async function updateDeviceSeen(sn: string, ip: string, req?: express.Request) {
+  if (!sn || IGNORED_SNS.test(sn)) return;
   const now = new Date();
-  await prisma.device.upsert({
-    where: { sn },
-    create: { sn, alias: sn, last_seen: now, ip },
-    update: { last_seen: now, ip },
-  });
+  // Race protection: se duas requests do mesmo REP chegam concorrentes,
+  // o upsert pode lançar P2002 no primeiro (ambos tentam create). Cai no
+  // catch e refaz como update simples.
+  try {
+    await prisma.device.upsert({
+      where: { sn },
+      create: { sn, alias: sn, last_seen: now, ip },
+      update: { last_seen: now, ip },
+    });
+  } catch (e: any) {
+    if (e?.code === "P2002") {
+      await prisma.device.update({ where: { sn }, data: { last_seen: now, ip } });
+    } else {
+      throw e;
+    }
+  }
   broadcast({ type: "device_update", sn, last_seen: now.toISOString(), online: true });
 
   if (req?.socket) {
