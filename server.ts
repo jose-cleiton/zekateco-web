@@ -1002,6 +1002,13 @@ app.post("/iclock/devicecmd", async (req, res) => {
     }
     broadcast({ type: "command_result", id: cmdId, success: ret >= 0 });
 
+    // Se for ack de um DATA QUERY transaction chunk histórico, enfileira o
+    // próximo da fila (serialização — evita bombardear o REP).
+    const cmd = await prisma.command.findUnique({ where: { id: cmdId }, select: { sn: true, command: true } });
+    if (cmd?.command?.startsWith("DATA QUERY tablename=transaction") && cmd.command.includes("StartTime=")) {
+      await enqueueNextHistoricChunk(cmd.sn!);
+    }
+
     const photoOp = await prisma.photoOp.findFirst({ where: { command_id: cmdId } });
     if (photoOp) {
       const isDeleteNotFound = ret === -2 && photoOp.op_type === "delete";
@@ -1534,9 +1541,28 @@ app.get("/api/logs", async (req, res) => {
   res.json(logs);
 });
 
-// Sincroniza histórico de logs do REP em janelas mensais (evita travar o
-// firmware que rejeita filter=* sem data). Passa 'from' e 'to' em YYYY-MM-DD
-// no body; o backend gera um DATA QUERY tablename=transaction por mês.
+// Estado da sincronização histórica de logs. Serializado no processo Node:
+// enfileiramos 1 chunk por vez; o handler devicecmd (Return=N) puxa o próximo.
+// Armazena por SN → array de chunks pendentes.
+const historicSyncQueues = new Map<string, { start: string; end: string }[]>();
+
+async function enqueueNextHistoricChunk(sn: string) {
+  const queue = historicSyncQueues.get(sn);
+  if (!queue || queue.length === 0) return;
+  const next = queue.shift()!;
+  await prisma.command.create({
+    data: {
+      sn,
+      command: `DATA QUERY tablename=transaction,fielddesc=*,filter=StartTime=${next.start},EndTime=${next.end}`,
+    },
+  });
+  console.log(`[ZK] sync-historic: enfileirado chunk ${next.start} → ${next.end} pra SN=${sn} (${queue.length} restantes)`);
+}
+
+// Sincroniza histórico de logs do REP em janelas MENSAIS SERIALIZADAS.
+// filter=* sem data trava o firmware, e enfileirar múltiplos chunks de uma
+// vez também trava. Enfileiramos só o primeiro; conforme o REP ack cada um,
+// o handler devicecmd chama enqueueNextHistoricChunk automaticamente.
 app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   const from = req.body?.from ? new Date(req.body.from) : null;
   const to = req.body?.to ? new Date(req.body.to) : new Date();
@@ -1546,28 +1572,24 @@ app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   const devices = await prisma.device.findMany({ select: { sn: true } });
   if (devices.length === 0) return res.status(400).json({ error: "Nenhum REP conectado." });
 
-  const chunks: { sn: string; start: string; end: string }[] = [];
+  const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
   const cursor = new Date(from.getTime());
-  cursor.setUTCDate(1); // início do mês
+  cursor.setUTCDate(1);
+  const chunks: { start: string; end: string }[] = [];
   while (cursor < to) {
     const start = new Date(cursor);
     cursor.setUTCMonth(cursor.getUTCMonth() + 1);
     const end = new Date(Math.min(cursor.getTime(), to.getTime()) - 1000);
-    const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
-    for (const dev of devices) {
-      chunks.push({ sn: dev.sn, start: fmt(start), end: fmt(end) });
-    }
+    chunks.push({ start: fmt(start), end: fmt(end) });
   }
 
-  for (const c of chunks) {
-    await prisma.command.create({
-      data: {
-        sn: c.sn,
-        command: `DATA QUERY tablename=transaction,fielddesc=*,filter=StartTime=${c.start},EndTime=${c.end}`,
-      },
-    });
+  let totalPlanned = 0;
+  for (const dev of devices) {
+    historicSyncQueues.set(dev.sn, [...chunks]);
+    totalPlanned += chunks.length;
+    await enqueueNextHistoricChunk(dev.sn);
   }
-  res.json({ success: true, chunks: chunks.length, devices: devices.length });
+  res.json({ success: true, chunks_per_device: chunks.length, devices: devices.length, total_planned: totalPlanned });
 });
 
 app.post("/api/sync-users", async (_req, res) => {
