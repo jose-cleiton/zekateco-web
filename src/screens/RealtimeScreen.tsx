@@ -76,7 +76,11 @@ export function RealtimeScreen({ logs, users }: Props) {
             </thead>
             <tbody>
               {filtered.length === 0 ? (
-                <tr><td colSpan={8} className="py-12 text-center text-ink-400 text-[13px]">Nenhum registro encontrado</td></tr>
+                <tr><td colSpan={8} className="py-12 text-center text-ink-400 text-[13px]">
+                  {enriched.length === 0
+                    ? "Aguardando registros em tempo real do REP…"
+                    : "Nenhum registro corresponde à busca"}
+                </td></tr>
               ) : filtered.map(r => {
                 const Ic = r.icon;
                 return (

@@ -21,7 +21,7 @@ import { FwScreen } from "./screens/FwScreen";
 const THEME_KEY = "ultraponto:theme";
 
 export default function App() {
-  const { devices, users, logs, serverPort, refresh } = useAppState();
+  const { devices, users, logs, realtimeLogs, serverPort, refresh } = useAppState();
   const { tabs, active, setActive, open, close } = useTabs();
   const [openGroups, setOpenGroups] = useState<string[]>(["usuarios", "relatorio", "sistema"]);
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -81,7 +81,7 @@ export default function App() {
             />
           : <div className="p-6 text-ink-500">Selecione um usuário na lista para editar.</div>;
       case "rt":
-        return <RealtimeScreen logs={logs} users={users} />;
+        return <RealtimeScreen logs={realtimeLogs} users={users} />;
       case "info-reg":
         return <InfoRegScreen logs={logs} users={users} refresh={refresh} />;
       case "rel":
