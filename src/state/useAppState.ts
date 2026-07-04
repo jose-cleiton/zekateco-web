@@ -7,6 +7,7 @@ export function useAppState() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
+  const [realtimeLogs, setRealtimeLogs] = useState<Log[]>([]);
   const [serverPort, setServerPort] = useState<string>("");
   const [loading, setLoading] = useState(true);
 
@@ -31,6 +32,7 @@ export function useAppState() {
   useWebSocket((msg) => {
     if (msg.type === "new_log") {
       setLogs(prev => [msg.log, ...prev].slice(0, 100));
+      setRealtimeLogs(prev => [msg.log, ...prev].slice(0, 200));
     } else if (msg.type === "device_update" || msg.type === "users_updated") {
       refresh();
     } else if (msg.type === "photo_op_update") {
@@ -48,5 +50,5 @@ export function useAppState() {
     }
   });
 
-  return { devices, users, logs, serverPort, loading, refresh, setUsers };
+  return { devices, users, logs, realtimeLogs, serverPort, loading, refresh, setUsers };
 }
