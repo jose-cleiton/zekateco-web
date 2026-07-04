@@ -1,11 +1,7 @@
-import { useEffect, useState } from "react";
-import { TopBar } from "./components/shell/TopBar";
-import { Sidebar } from "./components/shell/Sidebar";
-import { TabStrip } from "./components/shell/TabStrip";
-import { useAppState } from "./state/useAppState";
-import { useTabs, LABELS } from "./state/useTabs";
-import { api } from "./api";
-import type { User } from "./types";
+import { Navigate, Route, Routes, useOutletContext } from "react-router-dom";
+import { RepIndex } from "./routes/RepIndex";
+import { RepLayout, type RepOutletContext } from "./routes/RepLayout";
+import { RepByIp } from "./routes/RepByIp";
 
 import { HomeScreen } from "./screens/HomeScreen";
 import { UsersListScreen } from "./screens/UsersListScreen";
@@ -17,107 +13,119 @@ import { RelatorioScreen } from "./screens/RelatorioScreen";
 import { DispositivoScreen } from "./screens/DispositivoScreen";
 import { DadosScreen } from "./screens/DadosScreen";
 import { FwScreen } from "./screens/FwScreen";
+import { useNavigate } from "react-router-dom";
+import type { User } from "./types";
 
-const THEME_KEY = "ultraponto:theme";
+function useRep() {
+  return useOutletContext<RepOutletContext>();
+}
+
+function HomeRoute() {
+  const { device, users, serverPort, logs } = useRep();
+  return <HomeScreen device={device} users={users} serverPort={serverPort} totalLogs={logs.length} />;
+}
+
+function UsersListRoute() {
+  const { users, refresh, sn } = useRep();
+  const navigate = useNavigate();
+  return (
+    <UsersListScreen
+      users={users}
+      onEdit={(u) => {
+        // Passa o user via state — o EditUserRoute lê de window.history.state.usr.
+        navigate(`/rep/${encodeURIComponent(sn)}/edit-usuario`, { state: { user: u } });
+      }}
+      onDelete={async (pin, name) => {
+        if (!confirm(`Excluir "${name}" (PIN ${pin})? Também remove do REP.`)) return;
+        try {
+          const res = await fetch(`/api/users/${pin}`, { method: "DELETE" });
+          if (!res.ok) throw new Error((await res.json()).error || `HTTP ${res.status}`);
+          refresh();
+        } catch (e: any) {
+          alert(e.message || "Erro ao excluir");
+        }
+      }}
+      onNew={() => navigate(`/rep/${encodeURIComponent(sn)}/novo-usuario`)}
+      refresh={refresh}
+    />
+  );
+}
+
+function NewUserRoute() {
+  const { refresh, sn } = useRep();
+  const navigate = useNavigate();
+  return (
+    <NewUserScreen
+      onSaved={() => { refresh(); navigate(`/rep/${encodeURIComponent(sn)}/lista-usuarios`); }}
+      onCancel={() => navigate(`/rep/${encodeURIComponent(sn)}/lista-usuarios`)}
+    />
+  );
+}
+
+function EditUserRoute() {
+  const { refresh, sn } = useRep();
+  const navigate = useNavigate();
+  // O user passado via location.state; se recarregar, cai no fallback abaixo.
+  const state = window.history.state?.usr as { user?: User } | undefined;
+  const user = state?.user;
+  const goBack = () => navigate(`/rep/${encodeURIComponent(sn)}/lista-usuarios`);
+  if (!user) {
+    return <div className="p-6 text-ink-500">Selecione um usuário na lista para editar.</div>;
+  }
+  return (
+    <EditUserScreen
+      user={user}
+      onSaved={() => { refresh(); goBack(); }}
+      onCancel={goBack}
+    />
+  );
+}
+
+function RealtimeRoute() {
+  const { realtimeLogs, users } = useRep();
+  return <RealtimeScreen logs={realtimeLogs} users={users} />;
+}
+
+function InfoRegRoute() {
+  const { logs, users, refresh } = useRep();
+  return <InfoRegScreen logs={logs} users={users} refresh={refresh} />;
+}
+
+function RelatorioRoute() {
+  const { logs, users, refresh } = useRep();
+  return <RelatorioScreen logs={logs} users={users} refresh={refresh} />;
+}
+
+function DispositivoRoute() {
+  const { device, serverPort, refresh, readOnly } = useRep();
+  return <DispositivoScreen device={device} serverPort={serverPort} refresh={refresh} readOnly={readOnly} />;
+}
+
+function DadosRoute() {
+  const { users, logs } = useRep();
+  return <DadosScreen users={users} logs={logs} />;
+}
 
 export default function App() {
-  const { devices, users, logs, realtimeLogs, serverPort, refresh } = useAppState();
-  const { tabs, active, setActive, open, close } = useTabs();
-  const [openGroups, setOpenGroups] = useState<string[]>(["usuarios", "relatorio", "sistema"]);
-  const [editingUser, setEditingUser] = useState<User | null>(null);
-  const [theme, setTheme] = useState<"light" | "dark">(() => {
-    if (typeof window === "undefined") return "light";
-    const saved = localStorage.getItem(THEME_KEY);
-    return saved === "dark" ? "dark" : "light";
-  });
-
-  useEffect(() => {
-    const html = document.documentElement;
-    if (theme === "dark") html.classList.add("dark");
-    else html.classList.remove("dark");
-    localStorage.setItem(THEME_KEY, theme);
-  }, [theme]);
-
-  useEffect(() => {
-    document.title = "Ultraponto Webserver";
-  }, []);
-
-  const device = devices[0] ?? null;
-
-  const handleEditOpen = (u: User) => {
-    setEditingUser(u);
-    open("edit-usuario", LABELS["edit-usuario"]);
-  };
-
-  const handleDeleteUser = async (pin: string, name: string) => {
-    if (!confirm(`Excluir "${name}" (PIN ${pin})? Também remove do REP.`)) return;
-    try { await api.deleteUser(pin); refresh(); }
-    catch (e: any) { alert(e.message || "Erro ao excluir"); }
-  };
-
-  const renderScreen = () => {
-    switch (active) {
-      case "home":
-        return <HomeScreen device={device} users={users} serverPort={serverPort} totalLogs={logs.length} />;
-      case "novo-usuario":
-        return <NewUserScreen
-          onSaved={() => { close("novo-usuario"); open("lista-usuarios"); refresh(); }}
-          onCancel={() => close("novo-usuario")}
-        />;
-      case "lista-usuarios":
-        return <UsersListScreen
-          users={users}
-          onEdit={handleEditOpen}
-          onDelete={handleDeleteUser}
-          onNew={() => open("novo-usuario")}
-          refresh={refresh}
-        />;
-      case "edit-usuario":
-        return editingUser
-          ? <EditUserScreen
-              user={editingUser}
-              onSaved={() => { setEditingUser(null); close("edit-usuario"); refresh(); }}
-              onCancel={() => { setEditingUser(null); close("edit-usuario"); }}
-            />
-          : <div className="p-6 text-ink-500">Selecione um usuário na lista para editar.</div>;
-      case "rt":
-        return <RealtimeScreen logs={realtimeLogs} users={users} />;
-      case "info-reg":
-        return <InfoRegScreen logs={logs} users={users} refresh={refresh} />;
-      case "rel":
-        return <RelatorioScreen logs={logs} users={users} refresh={refresh} />;
-      case "dispositivo":
-        return <DispositivoScreen device={device} serverPort={serverPort} refresh={refresh} />;
-      case "dados":
-        return <DadosScreen users={users} logs={logs} />;
-      case "fw":
-        return <FwScreen />;
-      default:
-        return <div className="p-6 text-ink-500">Tela não implementada: {active}</div>;
-    }
-  };
-
   return (
-    <div className="h-screen flex flex-col">
-      <TopBar
-        dark={theme === "dark"}
-        onToggleTheme={() => setTheme(t => t === "dark" ? "light" : "dark")}
-        onSearch={() => alert("Busca global — em breve")}
-      />
-      <div className="flex flex-1 min-h-0">
-        <Sidebar
-          active={active}
-          openGroups={openGroups}
-          setOpenGroups={setOpenGroups}
-          onPick={(id) => open(id)}
-        />
-        <main className="flex-1 min-w-0 flex flex-col bg-ink-50 dark:bg-[#0E1117]">
-          <TabStrip tabs={tabs} active={active} onPick={setActive} onClose={close} />
-          <div className="flex-1 min-h-0 overflow-auto nice-scroll">
-            {renderScreen()}
-          </div>
-        </main>
-      </div>
-    </div>
+    <Routes>
+      <Route path="/" element={<RepIndex />} />
+      <Route path="/rep/ip/:ip" element={<RepByIp />} />
+      <Route path="/rep/:sn" element={<RepLayout />}>
+        <Route index element={<Navigate to="home" replace />} />
+        <Route path="home" element={<HomeRoute />} />
+        <Route path="lista-usuarios" element={<UsersListRoute />} />
+        <Route path="novo-usuario" element={<NewUserRoute />} />
+        <Route path="edit-usuario" element={<EditUserRoute />} />
+        <Route path="rt" element={<RealtimeRoute />} />
+        <Route path="info-reg" element={<InfoRegRoute />} />
+        <Route path="rel" element={<RelatorioRoute />} />
+        <Route path="dispositivo" element={<DispositivoRoute />} />
+        <Route path="dados" element={<DadosRoute />} />
+        <Route path="fw" element={<FwScreen />} />
+        <Route path="*" element={<Navigate to="home" replace />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }

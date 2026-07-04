@@ -9,6 +9,7 @@ interface Props {
   device: Device | null;
   serverPort: string;
   refresh: () => void;
+  readOnly?: boolean;
 }
 
 const SettingRow = ({ icon: Icon, label, hint, control }: { icon: any; label: string; hint?: string; control: ReactNode }) => (
@@ -22,7 +23,7 @@ const SettingRow = ({ icon: Icon, label, hint, control }: { icon: any; label: st
   </div>
 );
 
-export function DispositivoScreen({ device, serverPort, refresh }: Props) {
+export function DispositivoScreen({ device, serverPort, refresh, readOnly = false }: Props) {
   const isOnline = device?.online ?? false;
   const sn = device?.sn;
   const [syncState, setSyncState] = useState<"idle" | "sending" | "waiting" | "done" | "error">("idle");
@@ -120,9 +121,11 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
 
   return (
     <div className="p-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
-      <div className="xl:col-span-2">
-        <RepLockCard device={device} />
-      </div>
+      {!readOnly && (
+        <div className="xl:col-span-2">
+          <RepLockCard device={device} />
+        </div>
+      )}
 
       <div className="up-card p-5">
         <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white mb-3">Identificação</h3>
@@ -133,38 +136,43 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
           control={<span className={`text-[12.5px] font-medium px-2 py-0.5 rounded-full ${isOnline ? "bg-emerald-50 text-emerald-700" : "bg-ink-100 text-ink-500"}`}>{isOnline ? "Online" : "Offline"}</span>} />
         <SettingRow icon={Clock} label="Última vez visto"
           control={<span className="text-[12.5px] tabular">{device?.last_seen ? new Date(device.last_seen).toLocaleString("pt-BR") : "—"}</span>} />
-        <SettingRow icon={RefreshCw} label="Sincronizar usuários do REP" hint={syncMessage || "Puxa a lista atual do dispositivo"}
-          control={
-            <button
-              className="btn-soft inline-flex items-center gap-2"
-              onClick={onSyncDevices}
-              disabled={!isOnline || isSyncing}
-            >
-              {isSyncing && <Loader2 size={14} className="animate-spin" />}
-              {syncState === "done" && <Check size={14} className="text-emerald-600" />}
-              {isSyncing ? "Sincronizando..." : syncState === "done" ? "Pronto" : "Sincronizar"}
-            </button>
-          } />
+        {!readOnly && (
+          <SettingRow icon={RefreshCw} label="Sincronizar usuários do REP" hint={syncMessage || "Puxa a lista atual do dispositivo"}
+            control={
+              <button
+                className="btn-soft inline-flex items-center gap-2"
+                onClick={onSyncDevices}
+                disabled={!isOnline || isSyncing}
+              >
+                {isSyncing && <Loader2 size={14} className="animate-spin" />}
+                {syncState === "done" && <Check size={14} className="text-emerald-600" />}
+                {isSyncing ? "Sincronizando..." : syncState === "done" ? "Pronto" : "Sincronizar"}
+              </button>
+            } />
+        )}
       </div>
 
       <div className="up-card p-5">
         <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white mb-3">Servidor</h3>
         <SettingRow icon={Globe} label="Porta ADMS" control={<span className="font-mono tabular text-[13px]">{serverPort || "—"}</span>} />
-        <SettingRow icon={RotateCcw} label="Reiniciar dispositivo"
-          hint={rebootMessage || "Envia comando REBOOT ao REP"}
-          control={
-            <button
-              className="btn-outline inline-flex items-center gap-1.5"
-              onClick={onReboot}
-              disabled={!isOnline || rebootState === "sending"}
-            >
-              {rebootState === "sending" && <Loader2 size={12} className="animate-spin" />}
-              {rebootState === "done" && <Check size={12} className="text-emerald-600" />}
-              {rebootState === "sending" ? "Enviando..." : rebootState === "done" ? "Enfileirado" : "Reiniciar"}
-            </button>
-          } />
+        {!readOnly && (
+          <SettingRow icon={RotateCcw} label="Reiniciar dispositivo"
+            hint={rebootMessage || "Envia comando REBOOT ao REP"}
+            control={
+              <button
+                className="btn-outline inline-flex items-center gap-1.5"
+                onClick={onReboot}
+                disabled={!isOnline || rebootState === "sending"}
+              >
+                {rebootState === "sending" && <Loader2 size={12} className="animate-spin" />}
+                {rebootState === "done" && <Check size={12} className="text-emerald-600" />}
+                {rebootState === "sending" ? "Enviando..." : rebootState === "done" ? "Enfileirado" : "Reiniciar"}
+              </button>
+            } />
+        )}
       </div>
 
+      {!readOnly && (
       <div className="up-card p-5 xl:col-span-2">
         <div className="flex items-center mb-3 gap-2">
           <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white flex-1">
@@ -233,6 +241,7 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
         )}
         <input type="file" ref={mediaInput} accept="image/*" className="hidden" onChange={onMediaChange} />
       </div>
+      )}
     </div>
   );
 }

@@ -18,8 +18,11 @@ export const api = {
   async getLogs(): Promise<Log[]> {
     return jsonOrThrow(await fetch("/api/logs"));
   },
-  async getConfig(): Promise<{ port: number }> {
+  async getConfig(): Promise<{ port: number; read_only: boolean }> {
     return jsonOrThrow(await fetch("/api/config"));
+  },
+  async getDeviceByIp(ip: string): Promise<{ sn: string; ip: string; alias: string; locked: boolean; last_seen: string | null; online: boolean }[]> {
+    return jsonOrThrow(await fetch(`/api/devices/by-ip/${encodeURIComponent(ip)}`));
   },
 
   async createUser(data: { pin: string; name: string; privilege?: number; password?: string; card?: string }) {
