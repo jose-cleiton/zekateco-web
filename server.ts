@@ -54,6 +54,18 @@ async function s3Upload(pin: string, buf: Buffer): Promise<void> {
   }));
 }
 
+// Sobrescreve também a chave do Soltech (biometrics/<uuid>/face-photo.jpg) com
+// a foto atualizada pelo REP — sem isso, o dashboard continuaria servindo a
+// foto antiga do cadastro do Soltech.
+async function s3UploadSoltech(soltechUserId: string, buf: Buffer): Promise<void> {
+  await s3!.send(new PutObjectCommand({
+    Bucket: S3_BUCKET,
+    Key: `biometrics/${soltechUserId}/face-photo.jpg`,
+    Body: buf,
+    ContentType: "image/jpeg",
+  }));
+}
+
 async function s3Presign(pin: string): Promise<string> {
   return getSignedUrl(s3!, new GetObjectCommand({ Bucket: S3_BUCKET, Key: s3Key(pin) }), { expiresIn: PRESIGNED_TTL });
 }
@@ -364,6 +376,20 @@ app.post("/iclock/cdata", async (req, res) => {
     // outras firmwares usam USERINFO. Tratamos ambos como atualização incremental
     // de um único user — não é sync completo, então isFinalPacket=false (sem prune).
     await parseAndSaveUsers(SN as string, body, `cdata-${t}`);
+  } else if (t === "biodata" || t === "BIODATA" || t === "fingertmp" || t === "FINGERTMP") {
+    // Template biométrico binário (Type=9 face, Type=1 fingerprint). Não
+    // armazenamos local (já temos a foto JPEG via biophoto), só marcamos o
+    // user como atualizado e notificamos o dashboard.
+    const m = body.match(/pin=([\w-]+)/i);
+    if (m) {
+      const pin = m[1];
+      const exists = await prisma.user.findUnique({ where: { pin }, select: { pin: true } });
+      if (exists) {
+        await prisma.user.update({ where: { pin }, data: { last_synced_at: new Date() } });
+      }
+      console.log(`[ZK] cdata-${t}: template recebido para pin=${pin}`);
+      broadcast({ type: "users_updated" });
+    }
   } else if (t === "userpic" || t === "biophoto") {
     debugDump(SN as string, `cdata-${t}`, body);
     await parseAndSavePhotos(SN as string, body, t, `cdata-${t}`);
@@ -552,6 +578,17 @@ async function parseAndSavePhotos(sn: string, body: string, kind: string, source
       fs.writeFileSync(fullPath, buf);
       if (s3) {
         try { await s3Upload(pin, buf); } catch (e) { console.error(`[S3] upload pin=${pin} error:`, e); }
+        // Se o user tem soltech_user_id, sobrescreve também a chave do Soltech
+        // (biometrics/<uuid>/face-photo.jpg) pra que o dashboard — que serve dessa
+        // chave — exiba a foto atualizada pelo REP em tempo real.
+        try {
+          const existing = await prisma.user.findUnique({ where: { pin }, select: { soltech_user_id: true } });
+          if (existing?.soltech_user_id) {
+            await s3UploadSoltech(existing.soltech_user_id, buf);
+          }
+        } catch (e) {
+          console.error(`[S3] soltech upload pin=${pin} error:`, e);
+        }
       }
       const now = new Date();
       await prisma.user.upsert({
@@ -1194,11 +1231,20 @@ app.get("/api/users", async (_req, res) => {
       : null;
     const base = { ...u, photo_synced_at: u.photo_synced_at?.toISOString() ?? null };
     if (s3 && (u.soltech_user_id || u.photo_path)) {
-      // Soltech photos take priority: biometrics/{soltechUserId}/face-photo.jpg
+      // Foto do Soltech (biometrics/<uuid>/face-photo.jpg) é a chave canônica
+      // exibida no dashboard. Quando o REP empurra uma foto nova via push, o
+      // parseAndSavePhotos já sobrescreve essa mesma chave (via s3UploadSoltech),
+      // então o dashboard reflete a atualização sem mudar o photo_url.
+      // Cache-busting com last_synced_at força o browser a refetchar a URL.
       const key = u.soltech_user_id
         ? `biometrics/${u.soltech_user_id}/face-photo.jpg`
         : s3Key(u.pin);
-      const url = await s3PresignKey(key).catch(() => null);
+      let url = await s3PresignKey(key).catch(() => null);
+      // Cache-busting via fragment (#) — não vai pro S3, então não quebra a
+      // assinatura presigned. Browser trata #v=N como URL diferente e refetch.
+      if (url && u.last_synced_at) {
+        url = `${url}#v=${u.last_synced_at.getTime()}`;
+      }
       return { ...base, photo_url: url, photoSync: url ? photoSync : null, userSync };
     }
     if (!u.photo_path) return { ...base, photoSync, userSync };
