@@ -177,6 +177,10 @@ const IGNORED_SNS = /^(HEALTHCHECK|TEST|TESTE|PROBE|DEMO)/i;
 
 async function updateDeviceSeen(sn: string, ip: string, req?: express.Request) {
   if (!sn || IGNORED_SNS.test(sn)) return;
+  // X-Forwarded-For pode vir com múltiplos IPs (cadeia de proxies): o
+  // primeiro (leftmost) é sempre o cliente original. Pegamos só ele pra
+  // não guardar "1.2.3.4, 5.6.7.8" no campo Device.ip.
+  if (ip && ip.includes(",")) ip = ip.split(",")[0].trim();
   const now = new Date();
   // Race protection: se duas requests do mesmo REP chegam concorrentes,
   // o upsert pode lançar P2002 no primeiro (ambos tentam create). Cai no
