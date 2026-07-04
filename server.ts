@@ -1229,8 +1229,9 @@ app.get("/api/users", async (_req, res) => {
     SELECT pin, status, operation_id, error_detail FROM user_ops
     WHERE id IN (SELECT MAX(id) FROM user_ops GROUP BY pin)
   `;
-  const photoOpByPin = new Map(latestPhotoOps.map(r => [r.pin, r]));
-  const userOpByPin = new Map(latestUserOps.map(r => [r.pin, r]));
+  type OpRow = { pin: string; status: string; operation_id: string; error_detail: string | null };
+  const photoOpByPin = new Map<string, OpRow>(latestPhotoOps.map((r) => [r.pin, r]));
+  const userOpByPin = new Map<string, OpRow>(latestUserOps.map((r) => [r.pin, r]));
 
   const results = await Promise.all(users.map(async u => {
     const pop = photoOpByPin.get(u.pin);

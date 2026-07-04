@@ -1,6 +1,6 @@
 import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check, Image as ImageIcon, Upload, Trash2, Plus, X } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
-import type { ReactNode } from "react";
+import type { ChangeEvent, ReactNode } from "react";
 import type { Device } from "../types";
 import { api } from "../api";
 import { RepLockCard } from "../components/common/RepLockCard";
@@ -88,7 +88,7 @@ export function DispositivoScreen({ device, serverPort, refresh }: Props) {
 
   const onPickMedia = () => mediaInput.current?.click();
 
-  const onMediaChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const onMediaChange = async (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file || !sn) return;
