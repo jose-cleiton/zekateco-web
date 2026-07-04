@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import { useWebSocket } from "../ws";
 import type { Device, User, Log } from "../types";
 
-export function useAppState() {
+export function useAppState(sn?: string) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [logs, setLogs] = useState<Log[]>([]);
   const [realtimeLogs, setRealtimeLogs] = useState<Log[]>([]);
   const [serverPort, setServerPort] = useState<string>("");
+  const [readOnly, setReadOnly] = useState<boolean>(false);
   const [loading, setLoading] = useState(true);
 
   const refresh = useCallback(async () => {
@@ -26,7 +27,10 @@ export function useAppState() {
 
   useEffect(() => {
     refresh();
-    api.getConfig().then(c => setServerPort(String(c.port))).catch(() => {});
+    api.getConfig().then(c => {
+      setServerPort(String(c.port));
+      setReadOnly(!!c.read_only);
+    }).catch(() => {});
   }, [refresh]);
 
   useWebSocket((msg) => {
@@ -48,7 +52,32 @@ export function useAppState() {
           : u
       ));
     }
-  });
+  }, sn);
 
-  return { devices, users, logs, realtimeLogs, serverPort, loading, refresh, setUsers };
+  // Quando o hook é usado dentro de /rep/:sn, filtra os dados pelo REP ativo.
+  // O WS já vem filtrado do servidor (rooming), esse filtro cobre o fetch
+  // inicial via GET /api/logs e afins.
+  const filtered = useMemo(() => {
+    if (!sn) return { logs, realtimeLogs, users };
+    return {
+      logs: logs.filter(l => l.sn === sn),
+      realtimeLogs: realtimeLogs.filter(l => l.sn === sn),
+      // User é global (identificado por pin), mas o mapa user→REP fica em
+      // user.devices[]. Se o user nunca foi sincronizado com nenhum REP,
+      // devices é vazio — mantém visível (talvez cadastro pendente).
+      users: users.filter(u => !u.devices?.length || u.devices.some(d => d.sn === sn)),
+    };
+  }, [sn, logs, realtimeLogs, users]);
+
+  return {
+    devices,
+    users: filtered.users,
+    logs: filtered.logs,
+    realtimeLogs: filtered.realtimeLogs,
+    serverPort,
+    readOnly,
+    loading,
+    refresh,
+    setUsers,
+  };
 }

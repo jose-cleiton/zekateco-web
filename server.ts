@@ -1116,7 +1116,7 @@ app.post("/iclock/devicecmd", async (req, res) => {
 
 app.get("/api/config", (_req, res) => {
   const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-  res.json({ port });
+  res.json({ port, read_only: READ_ONLY });
 });
 
 app.get("/api/devices", async (_req, res) => {

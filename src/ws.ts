@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { WSMessage } from "./types";
 
-export function useWebSocket(onMessage: (msg: WSMessage) => void) {
+export function useWebSocket(onMessage: (msg: WSMessage) => void, sn?: string) {
   const handlerRef = useRef(onMessage);
   handlerRef.current = onMessage;
 
@@ -14,7 +14,8 @@ export function useWebSocket(onMessage: (msg: WSMessage) => void) {
     const connect = () => {
       if (stopped) return;
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      socket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+      const qs = sn ? `?sn=${encodeURIComponent(sn)}` : "";
+      socket = new WebSocket(`${protocol}//${window.location.host}/ws${qs}`);
 
       socket.onmessage = (event) => {
         try {
@@ -47,5 +48,5 @@ export function useWebSocket(onMessage: (msg: WSMessage) => void) {
       if (reconnectTimer) clearTimeout(reconnectTimer);
       socket?.close();
     };
-  }, []);
+  }, [sn]);
 }

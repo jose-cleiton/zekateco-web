@@ -22,6 +22,7 @@ export interface User {
   photo_url?: string;
   photoSync?: SyncStatus | null;
   userSync?: SyncStatus | null;
+  devices?: { sn: string; last_synced_at: string }[];
 }
 
 export interface Log {

@@ -37,12 +37,24 @@ interface Props {
   openGroups: string[];
   setOpenGroups: (g: string[] | ((prev: string[]) => string[])) => void;
   onPick: (id: string) => void;
+  readOnly?: boolean;
 }
 
-export function Sidebar({ active, openGroups, setOpenGroups, onPick }: Props) {
+// Itens que não fazem sentido em modo read-only (criam/atualizam no REP).
+const READ_ONLY_HIDDEN = new Set(["novo-usuario", "fw"]);
+
+export function Sidebar({ active, openGroups, setOpenGroups, onPick, readOnly }: Props) {
   const isOpen = (id: string) => openGroups.includes(id);
   const toggle = (id: string) =>
     setOpenGroups(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+
+  const menu = readOnly
+    ? MENU
+        .map(item => isGroup(item)
+          ? { ...item, children: item.children.filter(c => !READ_ONLY_HIDDEN.has(c.id)) }
+          : item)
+        .filter(item => !READ_ONLY_HIDDEN.has(item.id) && (!isGroup(item) || item.children.length > 0))
+    : MENU;
 
   return (
     <aside className="w-60 shrink-0 bg-up-500 up-sidebar-pattern text-white relative overflow-y-auto nice-scroll">
@@ -57,7 +69,7 @@ export function Sidebar({ active, openGroups, setOpenGroups, onPick }: Props) {
       </div>
 
       <nav className="mt-3 px-2 pb-4 space-y-0.5">
-        {MENU.map(item => {
+        {menu.map(item => {
           const ItemIcon = item.icon;
           const group = isGroup(item) ? item : null;
           const opened = group ? isOpen(group.id) : false;
