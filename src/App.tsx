@@ -83,9 +83,9 @@ export default function App() {
       case "rt":
         return <RealtimeScreen logs={logs} users={users} />;
       case "info-reg":
-        return <InfoRegScreen logs={logs} users={users} />;
+        return <InfoRegScreen logs={logs} users={users} refresh={refresh} />;
       case "rel":
-        return <RelatorioScreen logs={logs} users={users} />;
+        return <RelatorioScreen logs={logs} users={users} refresh={refresh} />;
       case "dispositivo":
         return <DispositivoScreen device={device} serverPort={serverPort} refresh={refresh} />;
       case "dados":

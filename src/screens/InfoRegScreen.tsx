@@ -1,12 +1,14 @@
 import { useState } from "react";
-import { Trash2, FileDown, FileUp, CalendarRange } from "lucide-react";
+import { Trash2, FileDown, FileUp, CalendarRange, RefreshCw, Loader2 } from "lucide-react";
 import { DateRangeModal, type DateRange } from "../components/common/DateRangeModal";
 import { formatLogTime } from "../utils/format";
+import { api } from "../api";
 import type { Log, User } from "../types";
 
 interface Props {
   logs: Log[];
   users: User[];
+  refresh?: () => void;
 }
 
 function filterLogs(logs: Log[], range: DateRange | null): Log[] {
@@ -21,12 +23,40 @@ function filterLogs(logs: Log[], range: DateRange | null): Log[] {
   });
 }
 
-export function InfoRegScreen({ logs, users }: Props) {
+export function InfoRegScreen({ logs, users, refresh }: Props) {
   const [showModal, setShowModal] = useState(true);
   const [range, setRange] = useState<DateRange | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState("");
   const userByPin = new Map(users.map(u => [u.pin, u.name]));
 
   const rows = filterLogs(logs, range);
+
+  const syncFromRep = async () => {
+    if (!range?.inicio) {
+      setSyncMsg("Selecione um período primeiro");
+      setTimeout(() => setSyncMsg(""), 3000);
+      return;
+    }
+    setSyncing(true);
+    setSyncMsg("Enfileirando busca no REP...");
+    try {
+      const r = await api.syncLogsHistoric(range.inicio, range.fim || undefined);
+      setSyncMsg(`REP processando ${r.chunks_per_device} janelas (~${r.chunks_per_device * 15}s)...`);
+      const poll = setInterval(() => refresh?.(), 15_000);
+      setTimeout(() => {
+        clearInterval(poll);
+        setSyncing(false);
+        setSyncMsg("Sincronização concluída");
+        setTimeout(() => setSyncMsg(""), 4000);
+        refresh?.();
+      }, Math.min(r.chunks_per_device * 15_000 + 10_000, 5 * 60_000));
+    } catch (e: any) {
+      setSyncing(false);
+      setSyncMsg(e.message || "Erro");
+      setTimeout(() => setSyncMsg(""), 5000);
+    }
+  };
 
   return (
     <div className="p-6 space-y-3">
@@ -35,7 +65,16 @@ export function InfoRegScreen({ logs, users }: Props) {
         <button className="btn-outline" disabled title="Em breve"><FileDown size={13} />Salvar logs como CSV</button>
         <button className="btn-outline" disabled title="Em breve"><FileUp size={13} />Carregar logs de CSV</button>
         <button className="btn-soft" onClick={() => setShowModal(true)}><CalendarRange size={13} />Filtrar por data</button>
-        <span className="text-[12px] text-rose-600 ml-2">Filtra os registros recebidos do REP por intervalo de data e ID.</span>
+        <button
+          className="btn-soft"
+          onClick={syncFromRep}
+          disabled={syncing || !range?.inicio}
+          title="Busca no REP os logs do período selecionado"
+        >
+          {syncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+          {syncing ? "Sincronizando..." : "Sincronizar do REP"}
+        </button>
+        <span className="text-[12px] text-rose-600 ml-2">{syncMsg || "Filtra os registros recebidos do REP por intervalo de data e ID."}</span>
       </div>
 
       <div className="up-card overflow-hidden">
