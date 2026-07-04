@@ -91,6 +91,44 @@ async function s3Download(pin: string): Promise<Buffer | null> {
   }
 }
 
+// --- Mirror inbound (Soltech → zekateco-web) --------------------------------
+// O Soltech encaminha cópia de cada request ADMS para /__mirror/iclock/*.
+// Valida o secret, marca a request como espelhada e reescreve a URL removendo
+// o prefixo — a request cai nas rotas /iclock/* existentes, passando pelos
+// MESMOS body parsers abaixo. Por isso precisa estar registrado antes deles.
+const MIRROR_SECRET = process.env.MIRROR_SECRET || "";
+app.use((req, res, next) => {
+  if (!req.url.startsWith("/__mirror/")) return next();
+  if (!MIRROR_SECRET || req.headers["x-mirror-secret"] !== MIRROR_SECRET) {
+    return res.status(401).type("text/plain").send("unauthorized");
+  }
+  if (!req.url.startsWith("/__mirror/iclock/")) {
+    return res.status(404).type("text/plain").send("not found");
+  }
+  // getrequest/devicecmd JAMAIS via mirror: além do read-only, o handler local
+  // de getrequest consulta o Soltech (SOLTECH_GATEWAY_URL) e poderia CONSUMIR
+  // um comando real da fila que o REP nunca receberia.
+  if (/^\/__mirror\/iclock\/(getrequest|devicecmd)\b/.test(req.url)) {
+    return res.status(204).end();
+  }
+  (req as any).mirrored = true;
+  req.url = req.url.slice("/__mirror".length);
+  next();
+});
+
+// --- Modo read-only ----------------------------------------------------------
+// READ_ONLY=1 → nenhum comando é enfileirado pro REP; escritas em /api → 501
+// (exceto mapeamentos locais de soltech-id, que não tocam o REP).
+// READ_ONLY=0 mantém o comportamento antigo (REP direto na 8090, dev local).
+const READ_ONLY = process.env.READ_ONLY === "1";
+const READ_ONLY_ALLOW = [/^\/api\/soltech-ids$/, /^\/api\/users\/[^/]+\/soltech-id$/];
+app.use("/api", (req, res, next) => {
+  if (!READ_ONLY || req.method === "GET") return next();
+  const pathOnly = req.originalUrl.split("?")[0];
+  if (READ_ONLY_ALLOW.some((rx) => rx.test(pathOnly))) return next();
+  res.status(501).json({ error: "Read-only mode — comandos via Soltech" });
+});
+
 // Body parser apenas para endpoints do REP (text/plain ou application/push).
 // Sem isso, multer não receberia multipart porque text() consome qualquer Content-Type.
 app.use("/iclock", express.text({ type: "*/*", limit: "10mb" }));
@@ -100,15 +138,22 @@ const PHOTOS_DIR = path.join(__dirname, "photos");
 fs.mkdirSync(PHOTOS_DIR, { recursive: true });
 app.use("/photos", express.static(PHOTOS_DIR, { etag: true, maxAge: 0 }));
 
-wss.on("connection", (client) => {
+wss.on("connection", (client, req) => {
+  // Cliente conecta em /ws?sn=<SN> e recebe só mensagens daquele SN.
+  // Sem ?sn=, recebe tudo (RepIndex precisa de device_update de todos).
+  try {
+    const sn = new URL(req.url || "", "http://localhost").searchParams.get("sn");
+    if (sn) (client as any).sn = sn;
+  } catch {}
   client.send(JSON.stringify({ type: "hello", boot_id: BOOT_ID }));
 });
 
 function broadcast(data: any) {
   wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify(data));
-    }
+    if (client.readyState !== WebSocket.OPEN) return;
+    const room = (client as any).sn as string | undefined;
+    if (room && data && typeof data.sn === "string" && data.sn !== room) return;
+    client.send(JSON.stringify(data));
   });
 }
 
@@ -151,7 +196,10 @@ async function updateDeviceSeen(sn: string, ip: string, req?: express.Request) {
   }
   broadcast({ type: "device_update", sn, last_seen: now.toISOString(), online: true });
 
-  if (req?.socket) {
+  // Requests espelhadas chegam pelo socket do axios do Soltech, não do REP —
+  // rastreá-las no deviceSessions faria o idle-kill matar conexões keep-alive
+  // do mirror à toa.
+  if (req?.socket && !(req as any).mirrored) {
     const prev = deviceSessions.get(sn);
     if (prev && prev.socket !== req.socket && !prev.socket.destroyed) {
       prev.socket.destroy();
@@ -279,7 +327,9 @@ app.post("/iclock/registry", async (req, res) => {
   // Sempre que o REP faz registry (reboot, reconexão), garantimos uma sync completa
   // de usuários. queueInitialCommands só enfileira se a fila estiver vazia, então
   // não duplica caso já tenha comandos pendentes.
-  await queueInitialCommands(SN as string);
+  if (!READ_ONLY && !(req as any).mirrored) {
+    await queueInitialCommands(SN as string);
+  }
 
   res.type("text/plain").send(`RegistryCode=REP_${SN}_abcd79\n`);
 });
@@ -1079,6 +1129,24 @@ app.get("/api/devices", async (_req, res) => {
     online: d.last_seen ? now - d.last_seen.getTime() < threshold : false,
   }));
   res.json(result);
+});
+
+// Resolve IP público → REP(s). Retorna LISTA: REPs atrás do mesmo NAT
+// compartilham IP público; o front trata a colisão com um seletor.
+app.get("/api/devices/by-ip/:ip", async (req, res) => {
+  const devices = await prisma.device.findMany({ where: { ip: req.params.ip } });
+  const threshold = 5 * 60 * 1000;
+  const now = Date.now();
+  res.json(
+    devices.map((d) => ({
+      sn: d.sn,
+      ip: d.ip,
+      alias: d.alias,
+      locked: d.locked,
+      last_seen: d.last_seen?.toISOString() ?? null,
+      online: d.last_seen ? now - d.last_seen.getTime() < threshold : false,
+    })),
+  );
 });
 
 // Enfileira SET OPTIONS <chave>=<valor> para o REP. O resultado real
