@@ -55,6 +55,13 @@ export const api = {
   async syncUsersFromDevice() {
     return jsonOrThrow(await fetch("/api/sync-users", { method: "POST" }));
   },
+  async syncLogsHistoric(from: string, to?: string): Promise<{ success: boolean; chunks_per_device: number; total_planned: number }> {
+    return jsonOrThrow(await fetch("/api/sync-logs-historic", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to }),
+    }));
+  },
 
   async setDeviceOptions(sn: string, options: Record<string, string | number>) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/options`, {

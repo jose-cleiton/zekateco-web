@@ -1,12 +1,14 @@
 import { useState, useMemo } from "react";
-import { CalendarRange, FileDown, FileSpreadsheet, Printer, List, Users as UsersIcon, LogIn, LogOut } from "lucide-react";
+import { CalendarRange, FileDown, FileSpreadsheet, Printer, List, Users as UsersIcon, LogIn, LogOut, RefreshCw, Loader2 } from "lucide-react";
 import { DateRangeModal, type DateRange } from "../components/common/DateRangeModal";
 import { formatLogTime } from "../utils/format";
+import { api } from "../api";
 import type { Log, User } from "../types";
 
 interface Props {
   logs: Log[];
   users: User[];
+  refresh?: () => void;
 }
 
 function filterLogs(logs: Log[], range: DateRange | null): Log[] {
@@ -21,9 +23,40 @@ function filterLogs(logs: Log[], range: DateRange | null): Log[] {
   });
 }
 
-export function RelatorioScreen({ logs, users }: Props) {
+export function RelatorioScreen({ logs, users, refresh }: Props) {
   const [showModal, setShowModal] = useState(true);
   const [range, setRange] = useState<DateRange | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string>("");
+
+  const syncFromRep = async () => {
+    if (!range?.inicio) {
+      setSyncMsg("Selecione um período primeiro");
+      setTimeout(() => setSyncMsg(""), 3000);
+      return;
+    }
+    setSyncing(true);
+    setSyncMsg("Enfileirando busca no REP...");
+    try {
+      const r = await api.syncLogsHistoric(range.inicio, range.fim || undefined);
+      setSyncMsg(`REP processando ${r.chunks_per_device} janelas mensais (~${r.chunks_per_device * 15}s). Atualizando...`);
+      // Polling: refresh a cada 15s enquanto sync roda no REP
+      const pollInterval = setInterval(async () => {
+        if (refresh) refresh();
+      }, 15_000);
+      setTimeout(() => {
+        clearInterval(pollInterval);
+        setSyncing(false);
+        setSyncMsg("Sincronização concluída");
+        setTimeout(() => setSyncMsg(""), 4000);
+        if (refresh) refresh();
+      }, Math.min(r.chunks_per_device * 15_000 + 10_000, 5 * 60_000));
+    } catch (e: any) {
+      setSyncing(false);
+      setSyncMsg(e.message || "Erro ao sincronizar");
+      setTimeout(() => setSyncMsg(""), 5000);
+    }
+  };
 
   const userByPin = new Map(users.map(u => [u.pin, u.name]));
 
@@ -40,10 +73,20 @@ export function RelatorioScreen({ logs, users }: Props) {
     <div className="p-6 space-y-3">
       <div className="up-card p-3 flex flex-wrap items-center gap-2">
         <button className="btn-soft" onClick={() => setShowModal(true)}><CalendarRange size={13} />Selecionar período</button>
+        <button
+          className="btn-soft"
+          onClick={syncFromRep}
+          disabled={syncing || !range?.inicio}
+          title="Busca no REP os logs do período selecionado"
+        >
+          {syncing ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+          {syncing ? "Sincronizando..." : "Sincronizar do REP"}
+        </button>
         <button className="btn-outline" disabled><FileDown size={13} />Exportar PDF</button>
         <button className="btn-outline" disabled><FileSpreadsheet size={13} />Exportar Excel</button>
         <button className="btn-outline" disabled><Printer size={13} />Imprimir</button>
-        {range && (
+        {syncMsg && <span className="text-[12.5px] text-ink-500">{syncMsg}</span>}
+        {range && !syncMsg && (
           <span className="ml-auto text-[12.5px] text-ink-500">
             Período: <span className="font-semibold text-ink-900 dark:text-white">{range.inicio || "—"} até {range.fim || "—"}</span>
           </span>
