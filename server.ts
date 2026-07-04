@@ -205,6 +205,17 @@ setInterval(async () => {
         data: { sn, command: "DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9" },
       });
     }
+    // Transactions (histórico de pontos). insertLogIgnoreDup usa unique index
+    // (sn, pin, time) — logs duplicados são ignorados silenciosamente, então
+    // rodar isso a cada 5min é idempotente.
+    const pendingTx = await prisma.command.count({
+      where: { sn, status: 0, command: { startsWith: "DATA QUERY tablename=transaction" } },
+    });
+    if (pendingTx === 0) {
+      await prisma.command.create({
+        data: { sn, command: "DATA QUERY tablename=transaction,fielddesc=*,filter=*" },
+      });
+    }
   }
 }, 5 * 60 * 1000);
 
@@ -222,6 +233,10 @@ async function queueInitialCommands(sn: string) {
         // esse pull FUNCIONA (retorna as fotos em pacotes), populando photo_path
         // dos users sem precisar de re-cadastro manual.
         { sn, command: "DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9" },
+        // Transactions (histórico de pontos). O REP mantém logs internamente e
+        // esse pull traz tudo. insertLogIgnoreDup deduplica via unique index
+        // (sn,pin,time), então re-runs são idempotentes.
+        { sn, command: "DATA QUERY tablename=transaction,fielddesc=*,filter=*" },
         { sn, command: "SET OPTIONS FVInterval=7" },
         { sn, command: `SET OPTIONS OpenTouchWakeUp=${v},TouchWakeUp=${v}` },
       ],
@@ -1469,8 +1484,24 @@ app.post("/api/photo-ops/:opId/retry", async (req, res) => {
   res.json({ success: true, message: "Operação reenfileirada" });
 });
 
-app.get("/api/logs", async (_req, res) => {
-  const logs = await prisma.log.findMany({ orderBy: { id: "desc" }, take: 100 });
+// Lista logs de ponto. Sem query params: retorna os 500 mais recentes (default
+// razoável pro dashboard). Com from/to: filtra por período no banco (índice em
+// logs.time cuida da performance). Sem LIMIT quando filtro é aplicado — relatório
+// pode precisar de milhares de linhas de meses passados.
+app.get("/api/logs", async (req, res) => {
+  const from = typeof req.query.from === "string" ? new Date(req.query.from) : null;
+  const to = typeof req.query.to === "string" ? new Date(req.query.to) : null;
+
+  const where: { time?: { gte?: Date; lte?: Date } } = {};
+  if (from && !isNaN(from.getTime())) where.time = { ...(where.time || {}), gte: from };
+  if (to && !isNaN(to.getTime())) where.time = { ...(where.time || {}), lte: to };
+
+  const hasFilter = Object.keys(where).length > 0;
+  const logs = await prisma.log.findMany({
+    where,
+    orderBy: { time: "desc" },
+    take: hasFilter ? 10000 : 500, // sem filtro: só recentes; com filtro: até 10k
+  });
   res.json(logs);
 });
 
