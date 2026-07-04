@@ -1,0 +1,43 @@
+name: Terraform Apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/terraform-apply.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    name: Apply
+    runs-on: ubuntu-latest
+    # Approval manual via GitHub Environments — configure em:
+    # Settings → Environments → production → Required reviewers
+    environment: production
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Terraform Init
+        run: terraform init -no-color -input=false
+
+      - name: Terraform Apply
+        run: terraform apply -no-color -input=false -auto-approve
+        env:
+          TF_VAR_hostinger_api_token: ${{ secrets.HOSTINGER_API_TOKEN }}
+          TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+
+      - name: Show outputs
+        run: terraform output -no-color
