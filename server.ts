@@ -205,17 +205,12 @@ setInterval(async () => {
         data: { sn, command: "DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9" },
       });
     }
-    // Transactions (histórico de pontos). insertLogIgnoreDup usa unique index
-    // (sn, pin, time) — logs duplicados são ignorados silenciosamente, então
-    // rodar isso a cada 5min é idempotente.
-    const pendingTx = await prisma.command.count({
-      where: { sn, status: 0, command: { startsWith: "DATA QUERY tablename=transaction" } },
-    });
-    if (pendingTx === 0) {
-      await prisma.command.create({
-        data: { sn, command: "DATA QUERY tablename=transaction,fielddesc=*,filter=*" },
-      });
-    }
+    // NOTA: pull de transaction desativado — no firmware SenseFace 7A,
+    // 'DATA QUERY tablename=transaction' trava o REP (não devolve devicecmd
+    // ack nem processa comandos subsequentes). Descoberto em 2026-07-04:
+    // logs históricos só chegam via push automático (rtlog/ATTLOG) quando
+    // acontecem em tempo real. Pra migrar histórico de outro DB, importar
+    // manualmente via SQL.
   }
 }, 5 * 60 * 1000);
 
@@ -233,10 +228,8 @@ async function queueInitialCommands(sn: string) {
         // esse pull FUNCIONA (retorna as fotos em pacotes), populando photo_path
         // dos users sem precisar de re-cadastro manual.
         { sn, command: "DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9" },
-        // Transactions (histórico de pontos). O REP mantém logs internamente e
-        // esse pull traz tudo. insertLogIgnoreDup deduplica via unique index
-        // (sn,pin,time), então re-runs são idempotentes.
-        { sn, command: "DATA QUERY tablename=transaction,fielddesc=*,filter=*" },
+        // NOTA: NÃO enfileirar 'DATA QUERY tablename=transaction' —
+        // trava o REP nesse firmware. Logs vêm via push rtlog/ATTLOG.
         { sn, command: "SET OPTIONS FVInterval=7" },
         { sn, command: `SET OPTIONS OpenTouchWakeUp=${v},TouchWakeUp=${v}` },
       ],

@@ -115,8 +115,10 @@ Enfileirados em `commands` table, entregues via `getrequest` (`C:<id>:<cmd>\r\n`
 - `SET OPTIONS FVInterval=7` — ajusta intervalo de verificação facial.
 
 **Não enfileirar** (firmware VDE2252800062 não responde com dados):
+
 - ~~`DATA QUERY tablename=biophoto,filter=Type=9` (count > 0 mas body vazio)~~ — **desatualizado**: agora funciona; enfileirado automaticamente pelo backend.
 - `DATA QUERY tablename=userpic` (Return=-1).
+- **`DATA QUERY tablename=transaction,fielddesc=*,filter=*`** ⚠️ — Descoberto em 2026-07-04: TRAVA o REP. Após enviar esse comando, o REP para de fazer ack no `/iclock/devicecmd` (nenhum comando subsequente é processado). Continua fazendo `getrequest` mas não devolve resposta. Requer **reboot físico** (desligar/ligar cabo de força) pra recuperar. Logs históricos só via push rtlog/ATTLOG em tempo real, ou migração manual via SQL.
 
 ## Devicecmd / Return code
 
