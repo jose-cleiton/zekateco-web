@@ -35,6 +35,10 @@ jobs:
       - name: Terraform Init
         id: init
         run: terraform init -no-color -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
 
       - name: Terraform Validate
         id: validate
@@ -48,6 +52,9 @@ jobs:
         env:
           TF_VAR_hostinger_api_token: ${{ secrets.HOSTINGER_API_TOKEN }}
           TF_VAR_ssh_public_key: ${{ secrets.SSH_PUBLIC_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
         continue-on-error: true
 
       - name: Comment plan on PR

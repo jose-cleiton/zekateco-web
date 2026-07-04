@@ -21,19 +21,24 @@ Gerencia a infraestrutura do VPS `srv784010.hstgr.cloud` (Hostinger) via API ofi
 # 1. Token da Hostinger via env var (nunca commitado)
 export TF_VAR_hostinger_api_token="$HOSTINGER_API_TOKEN"
 
-# 2. Copia o template e ajusta se precisar
+# 2. Credenciais AWS pro backend S3 (state remoto)
+export AWS_ACCESS_KEY_ID=$(grep '^AWS_ACCESS_KEY_ID=' ../.env | cut -d= -f2)
+export AWS_SECRET_ACCESS_KEY=$(grep '^AWS_SECRET_ACCESS_KEY=' ../.env | cut -d= -f2)
+export AWS_REGION=us-east-1
+
+# 3. Copia o template e ajusta se precisar
 cp terraform.tfvars.example terraform.tfvars
 
-# 3. Inicializa (baixa provider)
+# 4. Inicializa (baixa provider + conecta backend S3)
 terraform init
 
-# 4. Valida sintaxe
+# 5. Valida sintaxe
 terraform validate
 
-# 5. Confere o que vai mudar SEM aplicar
+# 6. Confere o que vai mudar SEM aplicar
 terraform plan
 
-# 6. Aplica após revisar o plan
+# 7. Aplica após revisar o plan
 terraform apply
 ```
 
@@ -53,12 +58,26 @@ terraform apply
 
 ## State
 
-Por padrão, state fica local em `terraform.tfstate` (protegido pelo `.gitignore`).
+State remoto no S3 (`s3://ultraponto-varejo/terraform/zekateco-web.tfstate`) — configurado em [`main.tf`](main.tf).
 
-Pra produção, migrar pra remote (evita perda de state e permite trabalho em equipe):
+- **Bucket**: `ultraponto-varejo` (o mesmo usado pra fotos biométricas)
+- **Encryption**: AES256 (server-side, automático)
+- **Versioning**: ligado no bucket — cada `terraform apply` gera versão nova, dá pra rollback
+- **Locking**: sem DynamoDB (IAM restrito ao bucket) — evite rodar `terraform apply` concorrente
 
-- **Terraform Cloud** (free até 5 usuários): https://app.terraform.io — descomentar bloco `backend "remote"` em `main.tf`
-- **S3** — bucket versionado + DynamoDB pra lock
+Ler o state exige credenciais AWS (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`) — via env vars local ou via secrets do GitHub Actions.
+
+**Se precisar recuperar versão anterior do state**:
+
+```bash
+# Lista versões do state
+aws s3api list-object-versions --bucket ultraponto-varejo --prefix terraform/zekateco-web.tfstate
+
+# Restaura versão específica
+aws s3api get-object --bucket ultraponto-varejo \
+  --key terraform/zekateco-web.tfstate \
+  --version-id <ID> ./terraform.tfstate.recovery
+```
 
 ## Recursos gerenciados
 
