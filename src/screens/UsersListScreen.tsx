@@ -1,8 +1,8 @@
-import { useState, Fragment, useRef } from "react";
+import { useState, Fragment, useRef, useCallback } from "react";
 import {
   UserPlus, Trash2, FileSpreadsheet, Upload, Download, FolderUp,
   Search, Calendar, RefreshCw, LayoutGrid, SlidersHorizontal,
-  ChevronsUpDown, Plus, Minus, Pencil, X, Camera, Loader2,
+  ChevronsUpDown, Plus, Minus, Pencil, X, Camera, Loader2, Check,
 } from "lucide-react";
 import { SyncBadge } from "../components/common/SyncBadge";
 import { api } from "../api";
@@ -22,7 +22,15 @@ export function UsersListScreen({ users, onEdit, onDelete, onNew, refresh }: Pro
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [perPage, setPerPage] = useState(15);
   const [uploadingPin, setUploadingPin] = useState<string | null>(null);
+  const [refreshState, setRefreshState] = useState<"idle" | "loading" | "done">("idle");
   const fileRefs = useRef<Record<string, HTMLInputElement | null>>({});
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshState("loading");
+    await Promise.resolve(refresh());
+    setRefreshState("done");
+    setTimeout(() => setRefreshState("idle"), 2000);
+  }, [refresh]);
 
   const filtered = users.filter(u =>
     !search || u.name.toLowerCase().includes(search.toLowerCase()) || u.pin.includes(search)
@@ -92,7 +100,20 @@ export function UsersListScreen({ users, onEdit, onDelete, onNew, refresh }: Pro
             <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-400" />
           </div>
           <button className="btn-ghost p-2 h-9 w-9 justify-center" title="Filtrar por data"><Calendar size={14} /></button>
-          <button className="btn-ghost p-2 h-9 w-9 justify-center" onClick={refresh} title="Recarregar"><RefreshCw size={14} /></button>
+          <button
+            className={`p-2 h-9 w-9 justify-center btn-ghost transition-colors ${
+              refreshState === "loading" ? "text-yellow-500 hover:text-yellow-500" :
+              refreshState === "done"    ? "text-green-500 hover:text-green-500" : ""
+            }`}
+            onClick={handleRefresh}
+            disabled={refreshState === "loading"}
+            title="Recarregar"
+          >
+            {refreshState === "done"
+              ? <Check size={14} />
+              : <RefreshCw size={14} className={refreshState === "loading" ? "animate-spin" : ""} />
+            }
+          </button>
           <button className="btn-ghost p-2 h-9 w-9 justify-center" title="Visão"><LayoutGrid size={14} /></button>
           <button className="btn-ghost p-2 h-9 w-9 justify-center" title="Colunas"><SlidersHorizontal size={14} /></button>
         </div>

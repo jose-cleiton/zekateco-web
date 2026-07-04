@@ -4,6 +4,7 @@ export interface Device {
   last_seen: string;
   ip: string;
   online: boolean;
+  locked: boolean;
 }
 
 export interface SyncStatus {

@@ -1,0 +1,16 @@
+# Copie pra terraform.tfvars e ajuste. NUNCA commite terraform.tfvars (protegido pelo .gitignore).
+# O token da Hostinger vem via env var TF_VAR_hostinger_api_token, NÃO aqui.
+
+vps_id       = 784010                    # zekateco-web.ultraponto
+vps_hostname = "zekateco-web.ultraponto"
+vps_ip       = "2.25.208.124"
+
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHZ674+/E4nrNSyIbFVC2YNz8iTu7Ib3hKEVrI9eGP/o cleitons835@gmail.com"
+ssh_key_name   = "cleitons835-ed25519"
+
+# DNS opcional — deixe vazio pra não configurar
+# domain    = "ultrasistech.com.br"
+# subdomain = "zekateco"
+
+# IPs autorizados no gateway ADMS (porta 8090). Padrão aberto.
+# allowed_rep_ips = ["203.0.113.10/32", "203.0.113.11/32"]

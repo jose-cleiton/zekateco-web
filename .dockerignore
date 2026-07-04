@@ -1,0 +1,13 @@
+node_modules
+dist
+photos
+zkteco.db
+zkteco.db-shm
+zkteco.db-wal
+.git
+.env
+.env.local
+.env.docker
+docs
+*.md
+Security PUSH Communication Protocol*.pdf

@@ -1,5 +1,33 @@
 # ZKTeco ADMS Dashboard — Notas para o Claude
 
+## ⚠️ REGRA CRÍTICA — INFRAESTRUTURA COMPARTILHADA
+
+**Este projeto compartilha conta Hostinger com aplicações de produção da UltraSistech.** Nunca alterar/reiniciar/deletar recursos das VPS abaixo sem autorização explícita do usuário (por escrito, nessa sessão):
+
+| VPS | IP | ID Hostinger | Uso |
+|---|---|---|---|
+| **VPS-API-2.ultraponto** | 187.77.1.162 | 1451747 | Produção Ultraponto — API |
+| **VPS-DB.ultraponto** | 72.62.173.226 | 1668455 | Produção Ultraponto — MySQL |
+| **VPS.UltraCRM** | 31.97.165.88 | 922006 | Produção UltraCRM |
+
+Se algum comando (Terraform, curl, ssh, gh, script) fizer referência a qualquer um desses IDs, IPs, hostnames, firewalls ou zonas DNS — **PARE e peça confirmação antes de executar**. A regra vale mesmo pra ações "só leitura" (probe TCP, `docker ps`, etc.) se envolver conectar naqueles hosts.
+
+VPS gerenciada por este projeto:
+
+| VPS | IP | ID | Uso |
+|---|---|---|---|
+| `zekateco-web.ultraponto` (renomeada de `srv784010.hstgr.cloud`) | 2.25.208.124 | 784010 | Produção zekateco-web (dashboard ADMS ZKTeco) |
+
+Aplicações antigas nessa VPS foram removidas com autorização explícita em 2026-07-04 (containers `ultraponto-api`, `ultraponto-keycloak`, `ultraponto-redis` — do stack EBSERH antigo, descontinuado).
+
+## ⚠️ REGRA CRÍTICA — CREDENCIAIS
+
+- **`.env` e `.tfvars` NUNCA vão pro Git.** Já protegidos em `.gitignore` (raiz e `terraform/`).
+- **Token Hostinger** fica em `/Users/jose-cleiton/dev/ssh/terraform-zekateco-web.txt` (chmod 600, carregado via `~/.zshrc`). NUNCA colar em log, PR, print ou commit.
+- **SOLTECH_DB_URL** em produção só pode ser consultada com autorização explícita — banco pertence ao stack de produção da Ultraponto.
+
+---
+
 Projeto: dashboard web (Express + better-sqlite3 + WebSocket + React 19) que conversa com REPs ZKTeco via **Push Protocol** (ADMS). Os REPs ficam em modo cliente HTTP, fazem polling no servidor e empurram dados (logs, usuários, fotos).
 
 Documento de referência: `Security PUSH Communication Protocol 20250429-1.pdf` (raiz do repo).
@@ -41,10 +69,11 @@ Keep-alive HTTP/1.1 mantém o socket aberto. Para detectar zombi:
    - Em algumas firmwares o `content=` vem em **segunda linha** após `\n` — o parser precisa dividir por boundary do prefixo (`userpic|biophoto`), não por `\n`.
    - **Resposta obrigatória**: `Content-Type: text/plain`, body `userpic=N` (ou `biophoto=N`), e **`Connection: close`** (PDF p.5121). Sem o `Connection: close`, o REP entra em loop reenviando a mesma foto.
 
-2. **Pull via `DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9`** (❌ NÃO funciona neste firmware VDE2252800062):
+2. **Pull via `DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9`** (✅ FUNCIONA em versão atual do firmware VDE2252800062):
    - Hybrid identification protocol exige `filter=Type=N` (Type=9 = Visible Light Face, Type=2 = NIR Face — Appendix biometric types).
-   - Mesmo com filter correto, esse firmware responde `Return=N` no devicecmd mas envia `querydata` com `count=0&packcnt=0&CL=0` — **conta as fotos, não envia o conteúdo**.
-   - Conclusão: para puxar foto antiga é preciso editá-la manualmente no REP, OU forçar push via comando (não trivial nesse protocolo).
+   - Confirmado em 2026-07-04: REP responde com `packcnt=N` reais e envia as fotos em pacotes de ~20-60KB cada. `Return=N` no devicecmd = número de records retornados.
+   - **Nota histórica**: em versões anteriores desse mesmo firmware o pull retornava `count=0&packcnt=0` (só contava, não enviava). Após update do firmware, passou a enviar. Se voltar a falhar, cair pra push automático via re-cadastro manual.
+   - **queueInitialCommands + safety-net (5min)** já enfileira esse pull automaticamente — fotos populam sozinhas.
 
 3. **`DATA QUERY tablename=userpic`** (❌ NÃO suportado):
    - Devicecmd responde `Return=-1` (= unsupported command). Não enfileirar.
@@ -86,7 +115,7 @@ Enfileirados em `commands` table, entregues via `getrequest` (`C:<id>:<cmd>\r\n`
 - `SET OPTIONS FVInterval=7` — ajusta intervalo de verificação facial.
 
 **Não enfileirar** (firmware VDE2252800062 não responde com dados):
-- `DATA QUERY tablename=biophoto,filter=Type=9` (count > 0 mas body vazio).
+- ~~`DATA QUERY tablename=biophoto,filter=Type=9` (count > 0 mas body vazio)~~ — **desatualizado**: agora funciona; enfileirado automaticamente pelo backend.
 - `DATA QUERY tablename=userpic` (Return=-1).
 
 ## Devicecmd / Return code
@@ -136,7 +165,7 @@ Content-Type observado do REP: `application/push;charset=UTF-8`. O parser captur
 ## Quirks do REP VDE2252800062 (firmware específico)
 
 - Não atualiza `last_seen` via `/iclock/ping` — usa só `getrequest` como heartbeat. Por isso `updateDeviceSeen` foi adicionado em todos os handlers.
-- `DATA QUERY tablename=biophoto` retorna count mas não envia dados (pull não funciona).
+- ~~`DATA QUERY tablename=biophoto` retorna count mas não envia dados~~ — **atualizado 2026-07-04**: pull agora funciona, retorna as fotos em pacotes. Enfileirado automaticamente em `queueInitialCommands` + safety-net.
 - `DATA QUERY tablename=userpic` não é suportado (Return=-1).
 - Push automático de userpic é rapidíssimo e correto após edit no REP.
 - Em algum loop antigo, o REP enviava a mesma foto repetidamente até receber resposta com `Connection: close`.

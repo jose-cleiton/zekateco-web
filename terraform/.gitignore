@@ -1,0 +1,25 @@
+# Terraform state e cache — NUNCA commitar
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfstate.backup
+
+# tfvars com secrets/dados sensíveis
+*.tfvars
+!*.tfvars.example
+
+# Logs de crash
+crash.log
+crash.*.log
+
+# Overrides locais
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Plan artifacts
+tfplan
+*.tfplan
+.firewall_id

@@ -3,6 +3,7 @@ import {
   Search, Calendar, RefreshCw, LayoutGrid, SlidersHorizontal,
   ChevronsUpDown, ScanFace, KeyRound, CreditCard, CheckCircle2,
 } from "lucide-react";
+import { formatLogTime } from "../utils/format";
 import type { Log, User } from "../types";
 
 interface Props {
@@ -63,7 +64,7 @@ export function RealtimeScreen({ logs, users }: Props) {
           <table className="w-full border-collapse min-w-[900px]">
             <thead>
               <tr className="bg-up-500 text-white">
-                <th className="up-th text-left" style={{ width: 180 }}>Hora <ChevronsUpDown size={11} className="inline ml-0.5 opacity-70" /></th>
+                <th className="up-th text-left" style={{ width: 220 }}>Data e Hora <ChevronsUpDown size={11} className="inline ml-0.5 opacity-70" /></th>
                 <th className="up-th text-left" style={{ width: 90 }}>ID</th>
                 <th className="up-th text-left">Nome</th>
                 <th className="up-th text-left">Identific.</th>
@@ -80,7 +81,7 @@ export function RealtimeScreen({ logs, users }: Props) {
                 const Ic = r.icon;
                 return (
                   <tr key={r.key} className="up-row border-b border-ink-200 dark:border-[#222A36]">
-                    <td className="up-td font-mono tabular">{r.hora}</td>
+                    <td className="up-td font-mono tabular">{formatLogTime(r.hora)}</td>
                     <td className="up-td font-mono tabular">{r.pin}</td>
                     <td className="up-td font-medium text-ink-900 dark:text-white">{r.nome}</td>
                     <td className="up-td">

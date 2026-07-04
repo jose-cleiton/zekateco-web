@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "terraform/**"
+      - "docs/**"
+      - "*.md"
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    name: TypeScript type-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: Type-check
+        run: npm run lint # equivale a tsc --noEmit
+
+  docker-build:
+    name: Docker build (smoke test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build backend image
+        run: docker build -f docker/backend/Dockerfile -t zekateco-backend:pr .
+
+      - name: Build frontend image
+        run: docker build -f docker/frontend/Dockerfile -t zekateco-frontend:pr .
