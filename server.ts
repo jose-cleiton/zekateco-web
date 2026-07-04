@@ -178,10 +178,10 @@ setInterval(async () => {
   }
 }, 15_000);
 
-// Safety-net de sincronização: a cada 5 min, enfileira DATA QUERY tablename=user
+// Safety-net de sincronização: a cada 5 min, enfileira DATA QUERY user + biophoto
 // pros REPs vistos recentemente. Cobre casos em que o OPERLOG não disparou
-// (ex.: REP desconectou no meio de uma edição). Não duplica comando se já tem
-// um pendente do mesmo tipo na fila.
+// (ex.: REP desconectou no meio de uma edição) e traz fotos de faces recém
+// cadastradas no menu do REP. Guard contra duplicação por tipo de query.
 setInterval(async () => {
   const cutoff = new Date(Date.now() - 10 * 60 * 1000);
   const devices = await prisma.device.findMany({
@@ -189,12 +189,20 @@ setInterval(async () => {
     select: { sn: true },
   });
   for (const { sn } of devices) {
-    const pending = await prisma.command.count({
+    const pendingUser = await prisma.command.count({
       where: { sn, status: 0, command: { startsWith: "DATA QUERY tablename=user" } },
     });
-    if (pending === 0) {
+    if (pendingUser === 0) {
       await prisma.command.create({
         data: { sn, command: "DATA QUERY tablename=user,fielddesc=*,filter=*" },
+      });
+    }
+    const pendingBio = await prisma.command.count({
+      where: { sn, status: 0, command: { startsWith: "DATA QUERY tablename=biophoto" } },
+    });
+    if (pendingBio === 0) {
+      await prisma.command.create({
+        data: { sn, command: "DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9" },
       });
     }
   }
@@ -210,6 +218,10 @@ async function queueInitialCommands(sn: string) {
     await prisma.command.createMany({
       data: [
         { sn, command: "DATA QUERY tablename=user,fielddesc=*,filter=*" },
+        // Biophotos (Type=9 = Visible Light Face). No firmware do SenseFace 7A
+        // esse pull FUNCIONA (retorna as fotos em pacotes), populando photo_path
+        // dos users sem precisar de re-cadastro manual.
+        { sn, command: "DATA QUERY tablename=biophoto,fielddesc=*,filter=Type=9" },
         { sn, command: "SET OPTIONS FVInterval=7" },
         { sn, command: `SET OPTIONS OpenTouchWakeUp=${v},TouchWakeUp=${v}` },
       ],
