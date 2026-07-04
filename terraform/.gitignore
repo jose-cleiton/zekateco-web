@@ -22,3 +22,4 @@ override.tf.json
 # Plan artifacts
 tfplan
 *.tfplan
+.firewall_id
