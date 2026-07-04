@@ -460,22 +460,58 @@ app.post("/iclock/querydata", async (req, res) => {
   } else if (tablename === "userpic" || tablename === "biophoto") {
     await parseAndSavePhotos(SN as string, body, tablename as string, `querydata-${tablename}`);
   } else if (tablename === "transaction") {
+    // Formato do pull (diferente do push rtlog/ATTLOG):
+    //   transaction index=NNN\tcardno=0\tpin=X\tverified=15\tdoorid=1\teventtype=3\tinoutstate=0\ttime_second=845882880
+    // time_second não é Unix timestamp — usa encoding proprietário ZKTeco
+    // (Appendix 5/6 do PDF): epoch 2000-01-01, "meses de 31 dias" pra codificação.
     const lines = body.split("\n");
+    let parsed = 0;
     for (const line of lines) {
       if (!line.trim()) continue;
-      const data: any = {};
-      line.split(/\s(?=\w+=)/).forEach((part) => {
-        const eq = part.indexOf("=");
-        if (eq > -1) data[part.slice(0, eq)] = part.slice(eq + 1);
-      });
+      const data: Record<string, string> = {};
+      // Delimitador pode ser \t (pull) ou espaço+chave= (push rtlog)
+      const parts = line.includes("\t") ? line.split("\t") : line.split(/\s(?=\w+=)/);
+      for (const p of parts) {
+        const eq = p.indexOf("=");
+        if (eq > -1) data[p.slice(0, eq).trim()] = p.slice(eq + 1);
+      }
+
       if (!data.pin || data.pin === "0") continue;
-      const status = parseInt(data.status) || 0;
-      const verifyType = parseInt(data.verify) || 0;
-      const id = await insertLogIgnoreDup(SN as string, data.pin, data.time || null, status, verifyType);
+
+      // Decodifica time_second (ZKTeco proprietary) → Date
+      let timeISO: string | null = null;
+      if (data.time_second) {
+        let tt = parseInt(data.time_second) || 0;
+        const sec = tt % 60; tt = Math.floor(tt / 60);
+        const min = tt % 60; tt = Math.floor(tt / 60);
+        const hour = tt % 24; tt = Math.floor(tt / 24);
+        const day = (tt % 31) + 1; tt = Math.floor(tt / 31);
+        const mon = (tt % 12) + 1; tt = Math.floor(tt / 12);
+        const year = tt + 2000;
+        // ZKTeco encoding tem "meses de 31 dias" — datas 29-31/fev são impossíveis
+        // no calendário real, mas o REP não gera essas datas naturalmente.
+        // JavaScript Date lida com overflow (ex: mês 2 dia 30 vira mês 3 dia 2)
+        // mas nesse encoding proprietário isso não deve acontecer.
+        const d = new Date(Date.UTC(year, mon - 1, day, hour, min, sec));
+        if (!isNaN(d.getTime())) timeISO = d.toISOString();
+      } else if (data.time) {
+        // Push (rtlog/ATTLOG) usa formato string legível — usa direto
+        timeISO = data.time;
+      }
+
+      // Mapeia campos ZKTeco → nosso schema
+      // inoutstate: 0=entrada, 1=saída, 2=outros
+      // verified: 1=digital, 15=face, 200=?, etc (mapeamento parcial)
+      const status = parseInt(data.inoutstate ?? data.status) || 0;
+      const verifyType = parseInt(data.verified ?? data.verify) || 0;
+
+      const id = await insertLogIgnoreDup(SN as string, data.pin, timeISO, status, verifyType);
       if (id !== null) {
-        broadcast({ type: "new_log", log: { id, sn: SN, ...data } });
+        parsed++;
+        broadcast({ type: "new_log", log: { id, sn: SN, pin: data.pin, time: timeISO, status, verify_type: verifyType } });
       }
     }
+    if (parsed > 0) console.log(`[ZK] querydata-transaction: saved ${parsed} logs from SN=${SN}`);
   } else {
     console.log(`[ZK] querydata unknown tablename: ${tablename}`);
   }
@@ -1496,6 +1532,42 @@ app.get("/api/logs", async (req, res) => {
     take: hasFilter ? 10000 : 500, // sem filtro: só recentes; com filtro: até 10k
   });
   res.json(logs);
+});
+
+// Sincroniza histórico de logs do REP em janelas mensais (evita travar o
+// firmware que rejeita filter=* sem data). Passa 'from' e 'to' em YYYY-MM-DD
+// no body; o backend gera um DATA QUERY tablename=transaction por mês.
+app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
+  const from = req.body?.from ? new Date(req.body.from) : null;
+  const to = req.body?.to ? new Date(req.body.to) : new Date();
+  if (!from || isNaN(from.getTime()) || isNaN(to.getTime())) {
+    return res.status(400).json({ error: "Passe from (YYYY-MM-DD) e opcionalmente to." });
+  }
+  const devices = await prisma.device.findMany({ select: { sn: true } });
+  if (devices.length === 0) return res.status(400).json({ error: "Nenhum REP conectado." });
+
+  const chunks: { sn: string; start: string; end: string }[] = [];
+  const cursor = new Date(from.getTime());
+  cursor.setUTCDate(1); // início do mês
+  while (cursor < to) {
+    const start = new Date(cursor);
+    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+    const end = new Date(Math.min(cursor.getTime(), to.getTime()) - 1000);
+    const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
+    for (const dev of devices) {
+      chunks.push({ sn: dev.sn, start: fmt(start), end: fmt(end) });
+    }
+  }
+
+  for (const c of chunks) {
+    await prisma.command.create({
+      data: {
+        sn: c.sn,
+        command: `DATA QUERY tablename=transaction,fielddesc=*,filter=StartTime=${c.start},EndTime=${c.end}`,
+      },
+    });
+  }
+  res.json({ success: true, chunks: chunks.length, devices: devices.length });
 });
 
 app.post("/api/sync-users", async (_req, res) => {
