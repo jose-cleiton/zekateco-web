@@ -1782,12 +1782,38 @@ async function enqueueNextHistoricChunk(sn: string) {
 app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   const from = req.body?.from ? new Date(req.body.from) : null;
   const to = req.body?.to ? new Date(req.body.to) : new Date();
+  const targetSn = (req.body && typeof req.body === "object" && (req.body as any).sn)
+    ? String((req.body as any).sn)
+    : null;
   if (!from || isNaN(from.getTime()) || isNaN(to.getTime())) {
     return res.status(400).json({ error: "Passe from (YYYY-MM-DD) e opcionalmente to." });
   }
-  const devices = await prisma.device.findMany({ select: { sn: true } });
-  if (devices.length === 0) return res.status(400).json({ error: "Nenhum REP conectado." });
+  const devices = targetSn
+    ? await prisma.device.findMany({ where: { sn: targetSn }, select: { sn: true } })
+    : await prisma.device.findMany({ select: { sn: true } });
+  if (devices.length === 0) return res.status(400).json({ error: "Nenhum REP encontrado." });
 
+  // Modo webdriver via API do Soltech: envia comando único DATA QUERY
+  // tablename=transaction (mesmo formato que o Soltech usa internamente pra
+  // getAllLogs). REP responde com todos os logs de uma vez via /iclock/cdata
+  // — nosso backend recebe pelo mirror.
+  if (isSoltechClientConfigured()) {
+    const results: { sn: string; via: string; ok: boolean; error?: string; opId?: number }[] = [];
+    for (const dev of devices) {
+      try {
+        const c = await enqueueRepCommand(dev.sn, "DATA QUERY tablename=transaction,fielddesc=,filter=");
+        results.push({ sn: dev.sn, via: c.via, ok: true, opId: c.opId ?? undefined });
+      } catch (e: any) {
+        results.push({ sn: dev.sn, via: "error", ok: false, error: e.message });
+      }
+    }
+    const ok = results.filter((r) => r.ok).length;
+    return res.json({ success: ok > 0, sent: ok, total: devices.length, mode: "webdriver", results });
+  }
+
+  // Fallback: fila local com chunks mensais (só funciona pra REP que aponta
+  // direto pra 2.25.208.124). Formato antigo, com startTime/EndTime — o
+  // SenseFace 7A às vezes trava, ver histórico do repo.
   const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
   const cursor = new Date(from.getTime());
   cursor.setUTCDate(1);
@@ -1805,7 +1831,7 @@ app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
     totalPlanned += chunks.length;
     await enqueueNextHistoricChunk(dev.sn);
   }
-  res.json({ success: true, chunks_per_device: chunks.length, devices: devices.length, total_planned: totalPlanned });
+  res.json({ success: true, chunks_per_device: chunks.length, devices: devices.length, total_planned: totalPlanned, mode: "local" });
 });
 
 app.post("/api/sync-users", express.json(), async (req, res) => {

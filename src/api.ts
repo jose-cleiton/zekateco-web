@@ -55,14 +55,18 @@ export const api = {
     return jsonOrThrow(await fetch(`/api/users/${pin}/photo`, { method: "DELETE" }));
   },
 
-  async syncUsersFromDevice() {
-    return jsonOrThrow(await fetch("/api/sync-users", { method: "POST" }));
+  async syncUsersFromDevice(sn?: string) {
+    return jsonOrThrow(await fetch("/api/sync-users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: sn ? JSON.stringify({ sn }) : undefined,
+    }));
   },
-  async syncLogsHistoric(from: string, to?: string): Promise<{ success: boolean; chunks_per_device: number; total_planned: number }> {
+  async syncLogsHistoric(from: string, to?: string, sn?: string): Promise<{ success: boolean; chunks_per_device?: number; total_planned?: number; mode?: string; sent?: number; results?: unknown }> {
     return jsonOrThrow(await fetch("/api/sync-logs-historic", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ from, to }),
+      body: JSON.stringify({ from, to, sn }),
     }));
   },
 
