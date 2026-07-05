@@ -14,8 +14,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    # Alias unico evita colisao com o service "db" do compose do Soltech (mysql-db),
-    # que tambem e visivel pelo backend agora que ele entrou em soltech_db_network.
     networks:
       internal:
         aliases:
@@ -30,8 +28,11 @@ services:
       DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@zekateco-db:3306/${MYSQL_DATABASE}
       PORT: 3000
       NODE_ENV: production
-      # Gateway de comandos: backend chama Soltech via DNS docker antes de servir fila local.
-      SOLTECH_GATEWAY_URL: http://ultraponto-api:8080
+      # Gateway de comandos: backend chama Soltech pelo IP público. Com o gateway
+      # nginx no host, o REP /iclock/getrequest vai direto pro Soltech via nginx
+      # (nem chega no backend). Esta var fica só como fallback caso algum código
+      # ainda tente falar com o Soltech direto.
+      SOLTECH_GATEWAY_URL: http://72.62.173.226:8080
       # S3 — fotos biométricas
       S3_BUCKET: ${S3_BUCKET}
       S3_PREFIX: ${S3_PREFIX:-zekateco-photos}
@@ -52,13 +53,7 @@ services:
       db:
         condition: service_healthy
     networks:
-      internal:
-      # Alias na rede compartilhada: o Soltech envia o mirror por DNS Docker
-      # interno (ZEKATECO_MIRROR_URL=http://zekateco-backend:3000/__mirror),
-      # sem sair pra internet.
-      soltech:
-        aliases:
-          - zekateco-backend
+      - internal
 
   frontend:
     build:
@@ -66,13 +61,12 @@ services:
       dockerfile: docker/frontend/Dockerfile
     restart: unless-stopped
     ports:
-      - "81:80" # dashboard local: 80 do host esta ocupado, mantemos 81
-      - "8090:8080" # gateway ADMS: REP aponta aqui; nginx faz mirror para Soltech + zekateco backend (host 8090 evita conflito com ultraponto-api)
+      - "81:80"     # dashboard local (80 do host pode estar ocupado)
+      - "8080:8080" # gateway ADMS — REPs chegam aqui via domínio api.ultraponto.ultrasistech.com.br
     depends_on:
       - backend
     networks:
       - internal
-      - soltech # rede compartilhada com Soltech (resolve "ultraponto-api" por DNS)
 
 volumes:
   mysql_data:
@@ -81,6 +75,3 @@ volumes:
 networks:
   internal:
     driver: bridge
-  soltech:
-    external: true
-    name: soltech_db_network
