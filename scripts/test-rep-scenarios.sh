@@ -7,7 +7,7 @@
 
 set -uo pipefail
 
-SOLTECH_IP="187.77.1.162"
+SOLTECH_IP="72.62.173.226"
 GATEWAY_IP="2.25.208.124"
 DOMAIN="api.ultraponto.ultrasistech.com.br"
 PORT="8080"

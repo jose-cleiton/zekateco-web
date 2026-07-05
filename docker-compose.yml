@@ -32,7 +32,7 @@ services:
       # nginx no host, o REP /iclock/getrequest vai direto pro Soltech via nginx
       # (nem chega no backend). Esta var fica só como fallback caso algum código
       # ainda tente falar com o Soltech direto.
-      SOLTECH_GATEWAY_URL: http://187.77.1.162:8080
+      SOLTECH_GATEWAY_URL: http://72.62.173.226:8080
       # S3 — fotos biométricas
       S3_BUCKET: ${S3_BUCKET}
       S3_PREFIX: ${S3_PREFIX:-zekateco-photos}
