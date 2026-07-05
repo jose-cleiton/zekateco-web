@@ -10,6 +10,7 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import { prisma } from "./src/db.js";
 import type { PhotoOp, UserOp } from "@prisma/client";
+import { allocateOpId, isSoltechClientConfigured, sendRepCommand } from "./src/soltechClient.js";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -331,6 +332,43 @@ setInterval(async () => {
     // manualmente via SQL.
   }
 }, 5 * 60 * 1000);
+
+/**
+ * Envia comando pra um REP escolhendo automaticamente o caminho:
+ *   1. Se cliente Soltech configurado (envs KEYCLOAK_* + SOLTECH_API_URL) →
+ *      chama POST /rep/zkteco/send-command/:sn do Soltech com op_id da faixa
+ *      5000-5999. Retorno vem pelo mirror do devicecmd (PR C).
+ *   2. Fallback: enfileira na tabela `commands` local (comportamento antigo).
+ *      Só chega no REP se ele apontar direto pra 2.25.208.124.
+ *
+ * Ambos os modos salvam registro na tabela `commands` pra o dashboard mostrar.
+ */
+async function enqueueRepCommand(
+  sn: string,
+  command: string,
+): Promise<{ id: number; opId: number | null; via: "soltech" | "local" }> {
+  if (isSoltechClientConfigured()) {
+    const opId = allocateOpId();
+    // Grava com status=1 (sent) porque já entregamos ao Soltech.
+    // Se falhar no send, atualizamos pra status=3 (error).
+    const c = await prisma.command.create({
+      data: { sn, command, status: 1, op_id: opId },
+    });
+    try {
+      await sendRepCommand(sn, command, opId);
+      return { id: c.id, opId, via: "soltech" };
+    } catch (e: any) {
+      await prisma.command.update({
+        where: { id: c.id },
+        data: { status: 3, return_code: -999 },
+      });
+      throw new Error(`Falha ao enviar comando via Soltech: ${e.message}`);
+    }
+  }
+  // Fallback: fila local (REP tem que apontar pra 2.25.208.124 pra consumir)
+  const c = await prisma.command.create({ data: { sn, command } });
+  return { id: c.id, opId: null, via: "local" };
+}
 
 async function queueInitialCommands(sn: string) {
   const pending = await prisma.command.count({ where: { sn, status: 0 } });
@@ -1246,13 +1284,17 @@ app.post("/api/devices/:sn/options", express.json(), async (req, res) => {
   const device = await prisma.device.findUnique({ where: { sn } });
   if (!device) return res.status(404).json({ error: "REP não encontrado" });
 
-  const created: { id: number; command: string }[] = [];
-  for (const [key, value] of Object.entries(options)) {
-    const command = `SET OPTIONS ${key}=${value}`;
-    const c = await prisma.command.create({ data: { sn, command } });
-    created.push({ id: c.id, command });
+  const created: { id: number; command: string; opId: number | null; via: string }[] = [];
+  try {
+    for (const [key, value] of Object.entries(options)) {
+      const command = `SET OPTIONS ${key}=${value}`;
+      const c = await enqueueRepCommand(sn, command);
+      created.push({ id: c.id, command, opId: c.opId, via: c.via });
+    }
+    res.json({ success: true, queued: created });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message, partial: created });
   }
-  res.json({ success: true, queued: created });
 });
 
 // Bloqueia/desbloqueia a verificação biométrica do REP.
@@ -1268,14 +1310,14 @@ app.post("/api/devices/:sn/lock", express.json(), async (req, res) => {
 
   await prisma.device.update({ where: { sn }, data: { locked } });
   const v = locked ? 1 : 0;
-  const setCmd = await prisma.command.create({
-    data: { sn, command: `SET OPTIONS OpenTouchWakeUp=${v},TouchWakeUp=${v}` },
-  });
-  const rebootCmd = await prisma.command.create({
-    data: { sn, command: "CONTROL DEVICE 03000000" },
-  });
-  broadcast({ type: "device_update", sn });
-  res.json({ success: true, locked, commandIds: [setCmd.id, rebootCmd.id] });
+  try {
+    const setCmd = await enqueueRepCommand(sn, `SET OPTIONS OpenTouchWakeUp=${v},TouchWakeUp=${v}`);
+    const rebootCmd = await enqueueRepCommand(sn, "CONTROL DEVICE 03000000");
+    broadcast({ type: "device_update", sn });
+    res.json({ success: true, locked, commandIds: [setCmd.id, rebootCmd.id], via: setCmd.via });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
 });
 
 // Otimiza imagem (wallpaper/promotion) pra caber no command do ADMS sem
@@ -1428,8 +1470,12 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
   const { sn } = req.params;
   const device = await prisma.device.findUnique({ where: { sn } });
   if (!device) return res.status(404).json({ error: "REP não encontrado" });
-  const c = await prisma.command.create({ data: { sn, command: "REBOOT" } });
-  res.json({ success: true, commandId: c.id });
+  try {
+    const c = await enqueueRepCommand(sn, "REBOOT");
+    res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
 });
 
 app.get("/api/users", async (_req, res) => {
@@ -1762,19 +1808,29 @@ app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   res.json({ success: true, chunks_per_device: chunks.length, devices: devices.length, total_planned: totalPlanned });
 });
 
-app.post("/api/sync-users", async (_req, res) => {
-  const devices = await prisma.device.findMany({ select: { sn: true } });
+app.post("/api/sync-users", express.json(), async (req, res) => {
+  // Se veio body {sn}, sincroniza só esse REP. Sem body, todos.
+  const targetSn = (req.body && typeof req.body === "object" && (req.body as any).sn)
+    ? String((req.body as any).sn)
+    : null;
+  const devices = targetSn
+    ? await prisma.device.findMany({ where: { sn: targetSn }, select: { sn: true } })
+    : await prisma.device.findMany({ select: { sn: true } });
   if (devices.length === 0) {
-    return res.status(400).json({ error: "Nenhum dispositivo conectado para sincronizar." });
+    return res.status(400).json({ error: "Nenhum dispositivo encontrado" });
   }
 
+  const results: { sn: string; via: string; ok: boolean; error?: string }[] = [];
   for (const dev of devices) {
-    await prisma.command.create({
-      data: { sn: dev.sn, command: "DATA QUERY tablename=user,fielddesc=*,filter=*" },
-    });
+    try {
+      const c = await enqueueRepCommand(dev.sn, "DATA QUERY tablename=user,fielddesc=*,filter=*");
+      results.push({ sn: dev.sn, via: c.via, ok: true });
+    } catch (e: any) {
+      results.push({ sn: dev.sn, via: "error", ok: false, error: e.message });
+    }
   }
-
-  res.json({ success: true, message: "Comando de sincronização enviado para todos os dispositivos." });
+  const ok = results.filter((r) => r.ok).length;
+  res.json({ success: ok > 0, sent: ok, total: devices.length, results });
 });
 
 // --- Vite Setup ---
