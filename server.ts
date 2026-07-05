@@ -173,7 +173,8 @@ function debugDump(sn: string, label: string, body: string) {
 
 // SNs "de teste" que não devem virar devices no banco. Usados por health
 // checks do CI e testes locais. Bloqueia poluição da tabela devices.
-const IGNORED_SNS = /^(HEALTHCHECK|TEST|TESTE|PROBE|DEMO)/i;
+// REPs ZKTeco reais começam com VDE, ZKC, etc — nenhum bate nesse regex.
+const IGNORED_SNS = /^(HEALTHCHECK|TEST|TESTE|PROBE|DEMO|SIM|SIMREP|MAC_|VPSHOST_|CONTAINER_|WAIT)/i;
 
 async function updateDeviceSeen(sn: string, ip: string, req?: express.Request) {
   if (!sn || IGNORED_SNS.test(sn)) return;
