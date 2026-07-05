@@ -46,6 +46,17 @@ services:
       READ_ONLY: ${READ_ONLY:-1}
       # Deve ser o MESMO valor do ZEKATECO_MIRROR_SECRET no Soltech.
       MIRROR_SECRET: ${MIRROR_SECRET}
+      # --- Webdriver mode via API do Soltech ---
+      # Quando configurado, endpoints de comando (/api/sync-users,
+      # /api/devices/:sn/reboot, etc.) chamam POST /rep/zkteco/send-command/:sn
+      # do Soltech (autenticado via Keycloak) em vez de enfileirar local.
+      # Sem essas envs, comandos caem no comportamento antigo (fila local, só
+      # funciona pro REP que aponta pra 2.25.208.124 direto).
+      SOLTECH_API_URL: ${SOLTECH_API_URL}
+      KEYCLOAK_URL: ${KEYCLOAK_URL}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-Ultraponto}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-zekateco-web}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
     volumes:
       - photos_data:/app/photos
     ports:
