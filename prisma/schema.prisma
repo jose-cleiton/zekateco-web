@@ -98,6 +98,12 @@ model Command {
   command    String?  @db.MediumText
   status     Int      @default(0)
   created_at DateTime @default(now())
+  // op_id: quando o comando foi enviado via API do Soltech (webdriver mode),
+  // este é o ID que colocamos no C:<ID>:<CMD>. Faixa 5000-5999 (reservada
+  // pro zekateco-web pra evitar colisão com IDs do Soltech). Nullable pros
+  // comandos antigos da fila local.
+  op_id      Int?     @unique
+  return_code Int?
 
   @@index([sn, status], map: "idx_commands_sn_status")
   @@map("commands")

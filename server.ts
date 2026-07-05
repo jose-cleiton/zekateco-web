@@ -108,9 +108,10 @@ app.use((req, res, next) => {
   // getrequest/devicecmd JAMAIS via mirror: além do read-only, o handler local
   // de getrequest consulta o Soltech (SOLTECH_GATEWAY_URL) e poderia CONSUMIR
   // um comando real da fila que o REP nunca receberia.
-  // MAS mesmo bloqueando o processamento, aproveitamos a request pra registrar
-  // o REP no dashboard — REPs em long-poll só fazem getrequest, sem isso não
-  // sabíamos que eles existem.
+  // MAS mesmo bloqueando o processamento, aproveitamos a request pra:
+  //   1. Registrar o REP no dashboard (updateDeviceSeen)
+  //   2. Se for devicecmd: parsear ID/Return e correlacionar com comandos
+  //      que nós enviamos via API do Soltech (op_id faixa 5000-5999).
   if (/^\/__mirror\/iclock\/(getrequest|devicecmd)\b/.test(req.url)) {
     const snMatch = /[?&]SN=([^&]+)/i.exec(req.url);
     if (snMatch) {
@@ -119,6 +120,44 @@ app.use((req, res, next) => {
       // Fire-and-forget — nunca bloqueia a resposta ao Soltech
       updateDeviceSeen(sn, ip, req).catch(() => {});
     }
+
+    // devicecmd: relógio postando resultado. Body: `ID=<n>&Return=<r>&CMD=...`
+    // (às vezes múltiplas linhas). Se ID cair na faixa nossa (5000-5999),
+    // marca comando como concluído no DB e broadcast pro dashboard.
+    if (req.method === "POST" && /\/devicecmd\b/.test(req.url)) {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        for (const line of body.split(/[\r\n]+/)) {
+          const idM = /(?:^|&)ID=(\d+)/.exec(line);
+          const retM = /(?:^|&)Return=(-?\d+)/.exec(line);
+          if (!idM || !retM) continue;
+          const opId = parseInt(idM[1]);
+          const ret = parseInt(retM[1]);
+          if (opId < 5000 || opId > 5999) continue; // comando do Soltech, ignora
+          const success = ret >= 0;
+          prisma.command
+            .updateMany({
+              where: { op_id: opId },
+              data: { status: success ? 2 : 3, return_code: ret },
+            })
+            .then((r) => {
+              if (r.count > 0) {
+                broadcast({
+                  type: "command_result",
+                  op_id: opId,
+                  return_code: ret,
+                  success,
+                });
+                console.log(`[mirror-devicecmd] op_id=${opId} return=${ret} → ${success ? "success" : "error"}`);
+              }
+            })
+            .catch(() => {});
+        }
+      });
+    }
+
     return res.status(204).end();
   }
   (req as any).mirrored = true;
