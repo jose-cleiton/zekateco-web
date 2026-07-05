@@ -1,7 +1,8 @@
-# Rollback Plan — Mirror ADMS + Webdriver mode
+# Rollback Plan — Mirror ADMS + Webdriver mode + Tail Daemon
 
-Guia de reversão das mudanças aplicadas em `2026-07-05` pra habilitar mirror
-de REPs ZKTeco do Soltech pro zekateco-web e modo webdriver.
+Guia de reversão das mudanças aplicadas em `2026-07-05` pra habilitar
+espelhamento de REPs ZKTeco do Soltech pro zekateco-web (via `mirror` do nginx
+e/ou daemon de tail-log), modo webdriver e ingestão em batch.
 
 ## Servidores envolvidos
 
@@ -51,8 +52,67 @@ fi
 
 - `ultraponto-api.bak-20260705-073616` — **antes de qualquer mirror** (original 100% intacto)
 - `ultraponto-api.bak-*-restrict` — versão com mirror em `location /` (antes de restringir a `/iclock/`)
+- `ultraponto-api.bak-*-nogetreq` — teste sem espelhar getrequest (abandonado)
+- `ultraponto-api.bak-*-getreq-back` — versão que voltou mirror completo com timeouts 1s
+- `ultraponto-api.bak-*-resolver` — adicionou `resolver` (tentativa que não resolveu sozinha)
+- `ultraponto-api.bak-*-logsub` — adicionou `log_subrequest on` (revelou que mirror já rodava mas silencioso)
 
 Pra voltar ao ponto zero absoluto, restaurar o **`.bak-20260705-073616`**.
+
+---
+
+## Rollback 2.5 — Parar o daemon `zekateco-tail.service` no VPS-DB
+
+Esse daemon lê `/var/log/nginx/access.log` do Soltech e envia batches de SNs vistos pro `POST /api/rep-seen-bulk` do zekateco-web a cada 5s. É o que popula o dashboard com 108+ REPs (o `mirror` do nginx sozinho só entrega ~5 por causa de REPs em loop).
+
+### Parar (sem desinstalar)
+
+```bash
+# No VPS-DB (72.62.173.226):
+systemctl stop zekateco-tail.service
+# Dashboard para de atualizar. Nada quebra no Soltech.
+```
+
+### Reiniciar
+
+```bash
+systemctl start zekateco-tail.service
+systemctl status zekateco-tail.service --no-pager
+```
+
+### Ver logs
+
+```bash
+# Últimas linhas
+journalctl -u zekateco-tail --no-pager -n 20
+
+# Ao vivo
+journalctl -u zekateco-tail -f
+```
+
+### Desinstalar completamente
+
+```bash
+systemctl stop zekateco-tail.service
+systemctl disable zekateco-tail.service
+rm /etc/systemd/system/zekateco-tail.service
+rm -rf /opt/zekateco-tail
+systemctl daemon-reload
+```
+
+### Ajustar intervalo do batch
+
+Editar `/opt/zekateco-tail/env` e mudar `BATCH_INTERVAL=5` pro valor desejado. Depois:
+
+```bash
+systemctl restart zekateco-tail.service
+```
+
+### Arquivos instalados no VPS-DB
+
+- `/opt/zekateco-tail/tail-and-post.py` — o daemon Python
+- `/opt/zekateco-tail/env` — config (contém o `MIRROR_SECRET`, chmod 600)
+- `/etc/systemd/system/zekateco-tail.service` — systemd unit
 
 ---
 
