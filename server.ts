@@ -183,7 +183,8 @@ function debugDump(sn: string, label: string, body: string) {
 
 // SNs "de teste" que não devem virar devices no banco. Usados por health
 // checks do CI e testes locais. Bloqueia poluição da tabela devices.
-const IGNORED_SNS = /^(HEALTHCHECK|TEST|TESTE|PROBE|DEMO)/i;
+// REPs reais começam com VDE/CP9L/NYU/AYS/AYT/0M/0X — nenhum bate nesse regex.
+const IGNORED_SNS = /^(HEALTHCHECK|TEST|TESTE|PROBE|DEMO|SIM|SIMREP|WAIT|CANARY|DEBUG|IP_TEST|REALTEST|MIRROR|CHECK|SPEED|SUBREQ|RESOLVE|RESTART|MAC_|VPSHOST_|CONTAINER_|[A-Z]_\d)/i;
 
 async function updateDeviceSeen(sn: string, ip: string, req?: express.Request) {
   if (!sn || IGNORED_SNS.test(sn)) return;
@@ -1131,6 +1132,38 @@ app.post("/iclock/devicecmd", async (req, res) => {
 app.get("/api/config", (_req, res) => {
   const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
   res.json({ port, read_only: READ_ONLY });
+});
+
+// Ingestão em massa de "REP visto" — alimenta o dashboard a partir do
+// access.log do nginx do Soltech (via daemon `tail-and-post` no VPS-DB).
+// Alternativa ao `mirror` do nginx que perde subrequests quando o worker
+// está sobrecarregado (ex: REPs em loop 2000+ req/s).
+app.post("/api/rep-seen-bulk", express.json({ limit: "5mb" }), async (req, res) => {
+  const secret = req.headers["x-mirror-secret"] as string | undefined;
+  if (!MIRROR_SECRET || secret !== MIRROR_SECRET) {
+    return res.status(401).json({ error: "unauthorized" });
+  }
+  const events = (req.body?.events || []) as { sn: string; ip?: string }[];
+  // Dedup por SN — o último IP do batch prevalece
+  const bySn = new Map<string, string>();
+  for (const ev of events) {
+    if (!ev.sn || typeof ev.sn !== "string") continue;
+    if (IGNORED_SNS.test(ev.sn)) continue;
+    bySn.set(ev.sn, ev.ip || "");
+  }
+  // Marca como espelhado pra pular tracking de socket (o socket aqui é
+  // do próprio tail-daemon, não do REP).
+  (req as any).mirrored = true;
+  let ok = 0;
+  for (const [sn, ip] of bySn) {
+    try {
+      await updateDeviceSeen(sn, ip, req);
+      ok++;
+    } catch {
+      // fire-and-forget silencioso — não queremos travar o batch inteiro
+    }
+  }
+  res.json({ received: events.length, unique: bySn.size, processed: ok });
 });
 
 app.get("/api/devices", async (_req, res) => {
