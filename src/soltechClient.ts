@@ -117,9 +117,18 @@ export async function sendRepCommand(sn: string, command: string, opId: number):
 
 /**
  * Aloca próximo op_id na faixa 5000-5999. Roda em cycle (depois de 5999, volta pra 5000).
- * Ao chegar em 5000 de novo, os comandos anteriores desse ID já foram concluídos há tempos.
+ *
+ * O contador precisa ser inicializado com base no MAX(op_id) do DB pra evitar
+ * colisão após restart do backend. Use `initOpIdCounter(startFrom)` antes do
+ * primeiro allocateOpId (chamado no server.ts após conectar no DB).
  */
 let nextOpIdCounter = 5000;
+export function initOpIdCounter(startFrom: number): void {
+  // Se o último op_id usado foi 5100, próximo é 5101. Se foi >= 5999, faz cycle.
+  const next = startFrom >= 5999 ? 5000 : startFrom + 1;
+  nextOpIdCounter = Math.max(5000, Math.min(5999, next));
+}
+
 export function allocateOpId(): number {
   const id = nextOpIdCounter;
   nextOpIdCounter = nextOpIdCounter >= 5999 ? 5000 : nextOpIdCounter + 1;
