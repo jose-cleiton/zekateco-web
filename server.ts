@@ -10,7 +10,7 @@ import { fileURLToPath } from "url";
 import crypto from "crypto";
 import { prisma } from "./src/db.js";
 import type { PhotoOp, UserOp } from "@prisma/client";
-import { allocateOpId, isSoltechClientConfigured, sendRepCommand } from "./src/soltechClient.js";
+import { allocateOpId, initOpIdCounter, isSoltechClientConfigured, sendRepCommand } from "./src/soltechClient.js";
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -1862,6 +1862,18 @@ app.post("/api/sync-users", express.json(), async (req, res) => {
 // --- Vite Setup ---
 
 async function startServer() {
+  // Inicializa contador de op_id com base no MAX do DB, pra não colidir com
+  // comandos já enviados em execuções anteriores do backend.
+  try {
+    const last = await prisma.command.aggregate({
+      _max: { op_id: true },
+      where: { op_id: { gte: 5000, lte: 5999 } },
+    });
+    if (last._max.op_id) initOpIdCounter(last._max.op_id);
+  } catch (e) {
+    console.warn("[startServer] falha ao inicializar op_id counter:", e);
+  }
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
