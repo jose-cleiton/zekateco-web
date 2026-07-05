@@ -108,7 +108,17 @@ app.use((req, res, next) => {
   // getrequest/devicecmd JAMAIS via mirror: além do read-only, o handler local
   // de getrequest consulta o Soltech (SOLTECH_GATEWAY_URL) e poderia CONSUMIR
   // um comando real da fila que o REP nunca receberia.
+  // MAS mesmo bloqueando o processamento, aproveitamos a request pra registrar
+  // o REP no dashboard — REPs em long-poll só fazem getrequest, sem isso não
+  // sabíamos que eles existem.
   if (/^\/__mirror\/iclock\/(getrequest|devicecmd)\b/.test(req.url)) {
+    const snMatch = /[?&]SN=([^&]+)/i.exec(req.url);
+    if (snMatch) {
+      const sn = decodeURIComponent(snMatch[1]);
+      const ip = (req.headers["x-forwarded-for"] as string) || req.ip || "";
+      // Fire-and-forget — nunca bloqueia a resposta ao Soltech
+      updateDeviceSeen(sn, ip, req).catch(() => {});
+    }
     return res.status(204).end();
   }
   (req as any).mirrored = true;
