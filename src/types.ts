@@ -59,4 +59,4 @@ export type WSMessage =
   | { type: "users_updated" }
   | { type: "photo_op_update"; operation_id: string; status: SyncStatus["status"]; pin: string; error_detail?: string }
   | { type: "user_op_update"; operation_id: string; status: SyncStatus["status"]; pin: string; error_detail?: string }
-  | { type: "command_result"; id: number; success: boolean };
+  | { type: "command_result"; id?: number; op_id?: number; success: boolean; return_code?: number };
