@@ -83,14 +83,15 @@ jobs:
 
       - name: Health check — ADMS gateway
         run: |
-          # Health check com SN vazio: valida que nginx roteia e backend
-          # responde, sem criar um device fake no banco (SN=HEALTHCHECK
-          # antes ficava cadastrado como REP e poluía a listagem).
+          # Gateway agora roteia pro Soltech em 187.77.1.162 (arquitetura
+          # de proxy). Basta validar que nginx está de pé e proxy funciona
+          # — qualquer resposta HTTP < 500 (incluindo 4xx do Soltech) prova
+          # que a cadeia REP → nginx → Soltech está viva.
           for i in 1 2 3 4 5; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "http://${VPS_HOST}:8090/iclock/cdata" || echo "000")
+            code=$(curl -s -o /dev/null -w "%{http_code}" "http://${VPS_HOST}:8080/iclock/cdata" || echo "000")
             echo "Tentativa $i → HTTP $code"
-            if [ "$code" = "200" ]; then exit 0; fi
+            if [ -n "$code" ] && [ "$code" != "000" ] && [ "$code" -lt 500 ]; then exit 0; fi
             sleep 5
           done
-          echo "❌ Gateway ADMS não respondeu 200 após 5 tentativas"
+          echo "❌ Gateway ADMS não respondeu (000 ou 5xx) após 5 tentativas"
           exit 1
