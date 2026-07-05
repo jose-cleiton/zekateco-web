@@ -28,11 +28,12 @@ services:
       DATABASE_URL: mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@zekateco-db:3306/${MYSQL_DATABASE}
       PORT: 3000
       NODE_ENV: production
-      # Gateway de comandos: backend chama Soltech pelo IP público. Com o gateway
-      # nginx no host, o REP /iclock/getrequest vai direto pro Soltech via nginx
-      # (nem chega no backend). Esta var fica só como fallback caso algum código
-      # ainda tente falar com o Soltech direto.
-      SOLTECH_GATEWAY_URL: http://72.62.173.226:8080
+      # Gateway de comandos: backend chama o BACKEND Soltech DIRETO
+      # (187.77.1.162:8080), sem passar pelo nginx do VPS-DB (72.62.173.226).
+      # Isso evita loop quando o nginx do VPS-DB começa a rotear getrequest
+      # de volta pra nós (webdriver mode pra REPs que ainda apontam pro
+      # domínio api.ultraponto.ultrasistech.com.br).
+      SOLTECH_GATEWAY_URL: http://187.77.1.162:8080
       # S3 — fotos biométricas
       S3_BUCKET: ${S3_BUCKET}
       S3_PREFIX: ${S3_PREFIX:-zekateco-photos}
