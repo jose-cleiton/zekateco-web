@@ -405,6 +405,25 @@ app.get("/iclock/ping", async (req, res) => {
   res.type("text/plain").send("OK");
 });
 
+// Alguns REPs, após receber "SET OPTIONS DateTime=..." (9.5.1), não aplicam
+// o valor enviado diretamente — em vez disso, disparam esta requisição
+// pedindo a hora "oficial" do servidor, e só ajustam o relógio com base
+// nessa resposta. Sem este endpoint, o ack do SET OPTIONS vem com sucesso
+// (Return=0) mas o relógio do REP nunca muda de fato — bug já observado ao
+// vivo (comando aceito, hora do aparelho não mudou).
+app.get("/iclock/rtdata", async (req, res) => {
+  const { SN, type } = req.query;
+  console.log(`[ZK] rtdata from SN: ${SN}, type: ${type}`);
+  if (SN) await updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
+  if (type === "time") {
+    const now = new Date();
+    const seconds = encodeZktecoDateTime(now);
+    const serverTZ = getZonedOffset(now, APP_TIMEZONE);
+    return res.type("text/plain").send(`DateTime=${seconds},ServerTZ=${serverTZ}`);
+  }
+  res.type("text/plain").send("OK");
+});
+
 // 0. Handshake / Registry
 app.post("/iclock/registry", async (req, res) => {
   const { SN } = req.query;
@@ -1154,17 +1173,21 @@ app.post("/iclock/devicecmd", async (req, res) => {
     // Return ≥ 0 = success (N records). Negatives = error codes.
     // updateMany (em vez de update) e guarda count > 0: no setup mirror, o REP envia
     // acks de comandos enfileirados pelo Soltech — esses IDs não existem aqui.
-    const upd = await prisma.command.updateMany({ where: { id: cmdId }, data: { status: ret >= 0 ? 2 : 3 } });
+    const upd = await prisma.command.updateMany({ where: { id: cmdId }, data: { status: ret >= 0 ? 2 : 3, return_code: ret } });
     if (upd.count === 0) {
       return res.type("text/plain").send("OK");
     }
-    broadcast({ type: "command_result", id: cmdId, success: ret >= 0 });
+    broadcast({ type: "command_result", id: cmdId, success: ret >= 0, return_code: ret });
 
     // Se for ack de um DATA QUERY transaction chunk histórico, enfileira o
     // próximo da fila (serialização — evita bombardear o REP).
     const cmd = await prisma.command.findUnique({ where: { id: cmdId }, select: { sn: true, command: true } });
     if (cmd?.command?.startsWith("DATA QUERY tablename=transaction") && cmd.command.includes("StartTime=")) {
       await enqueueNextHistoricChunk(cmd.sn!);
+    }
+    if (ret >= 0 && cmd?.command?.startsWith("SET OPTIONS DateTime=")) {
+      await prisma.device.update({ where: { sn: cmd.sn! }, data: { clock_synced_at: new Date() } });
+      broadcast({ type: "device_update", sn: cmd.sn! });
     }
 
     const photoOp = await prisma.photoOp.findFirst({ where: { command_id: cmdId } });
@@ -1250,6 +1273,7 @@ app.get("/api/devices", async (_req, res) => {
   const result = devices.map((d) => ({
     ...d,
     last_seen: d.last_seen?.toISOString() ?? null,
+    clock_synced_at: d.clock_synced_at?.toISOString() ?? null,
     online: d.last_seen ? now - d.last_seen.getTime() < threshold : false,
   }));
   res.json(result);
@@ -1472,6 +1496,65 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
   if (!device) return res.status(404).json({ error: "REP não encontrado" });
   try {
     const c = await enqueueRepCommand(sn, "REBOOT");
+    res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// Fuso do horário que deve ser aplicado ao REP — não confiar no TZ do
+// sistema operacional do container (containers Docker default pra UTC a
+// menos que configurado, o que já causou um bug real: o servidor calculava
+// a hora em UTC e mandava isso pro REP como se fosse horário local).
+const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Sao_Paulo";
+
+// Extrai ano/mês/dia/hora/min/seg de uma Date NO FUSO configurado,
+// independente do fuso do processo Node.
+function getZonedParts(d: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const get = (type: string) => parseInt(parts.find((p) => p.type === type)!.value);
+  return { year: get("year"), mon: get("month"), day: get("day"), hour: get("hour") % 24, min: get("minute"), sec: get("second") };
+}
+
+// Retorna o offset UTC do fuso configurado no formato "+HHMM"/"-HHMM"
+// esperado pelo campo ServerTZ do protocolo ADMS.
+function getZonedOffset(d: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "shortOffset" }).formatToParts(d);
+  const tzName = parts.find((p) => p.type === "timeZoneName")?.value || "GMT+0";
+  const m = tzName.match(/GMT([+-]\d{1,2})(?::?(\d{2}))?/);
+  if (!m) return "+0000";
+  const sign = m[1].startsWith("-") ? "-" : "+";
+  const hh = String(Math.abs(parseInt(m[1]))).padStart(2, "0");
+  const mm = (m[2] || "00").padStart(2, "0");
+  return `${sign}${hh}${mm}`;
+}
+
+// Converte data/hora pro formato de segundos usado pelo ADMS
+// ("Security PUSH Communication Protocol", Apêndice 5 - Algorithm to Convert
+// Date to Seconds), no fuso configurado em APP_TIMEZONE — não é um
+// timestamp Unix.
+function encodeZktecoDateTime(d: Date): number {
+  const { year, mon, day, hour, min, sec } = getZonedParts(d, APP_TIMEZONE);
+  return ((year - 2000) * 12 * 31 + (mon - 1) * 31 + day - 1) * (24 * 60 * 60) + (hour * 60 + min) * 60 + sec;
+}
+
+// Sincroniza o relógio do REP com o horário atual do servidor (protocolo
+// 9.5.1 Set Options — "Synchronize the time to the client": SET OPTIONS
+// DateTime=<segundos>). O ack (Return>=0 em /iclock/devicecmd) marca
+// device.clock_synced_at — não temos como ler a hora ao vivo do aparelho,
+// só confirmar que o comando foi aplicado.
+app.post("/api/devices/:sn/sync-clock", async (req, res) => {
+  const { sn } = req.params;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  try {
+    const seconds = encodeZktecoDateTime(new Date());
+    const c = await enqueueRepCommand(sn, `SET OPTIONS DateTime=${seconds}`);
     res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
   } catch (e: any) {
     res.status(502).json({ error: e.message });

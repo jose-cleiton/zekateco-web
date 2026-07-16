@@ -21,12 +21,16 @@ enum OpStatus {
 }
 
 model Device {
-  sn        String        @id @db.VarChar(64)
-  alias     String?       @db.VarChar(255)
-  last_seen DateTime?
-  ip        String?       @db.VarChar(64)
-  locked    Boolean       @default(true)
-  media     DeviceMedia[]
+  sn                    String        @id @db.VarChar(64)
+  alias                 String?       @db.VarChar(255)
+  last_seen             DateTime?
+  ip                    String?       @db.VarChar(64)
+  locked                Boolean       @default(true)
+  media                 DeviceMedia[]
+  // Preenchido quando o REP confirma (ack com Return>=0) um comando
+  // "SET OPTIONS DateTime=...". Não é a hora ao vivo do aparelho — é o
+  // momento em que sabemos, com certeza, que o relógio dele foi ajustado.
+  clock_synced_at       DateTime?
 
   @@map("devices")
 }

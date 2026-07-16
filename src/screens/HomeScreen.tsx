@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Plug, RefreshCw } from "lucide-react";
 import { SoftFrame } from "../components/common/SoftFrame";
+import { api } from "../api";
 import type { Device, User } from "../types";
 
 interface Props {
@@ -12,14 +13,34 @@ interface Props {
 
 export function HomeScreen({ device, users, serverPort, totalLogs }: Props) {
   const [syncing, setSyncing] = useState(false);
-  const [lastSync, setLastSync] = useState<string | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const clockSyncedAt = device?.clock_synced_at ?? null;
+  const prevClockSyncedAt = useRef(clockSyncedAt);
 
-  const doSync = () => {
-    setSyncing(true);
-    setTimeout(() => {
+  // O ack do REP chega de forma assíncrona (via /iclock/devicecmd) e o
+  // dashboard é atualizado por WS (device_update) quando isso acontece. Aqui
+  // detectamos essa confirmação real (clock_synced_at mudou) pra parar o
+  // spinner — em vez de um setTimeout fake como antes.
+  useEffect(() => {
+    if (clockSyncedAt !== prevClockSyncedAt.current) {
+      prevClockSyncedAt.current = clockSyncedAt;
       setSyncing(false);
-      setLastSync(new Date().toLocaleTimeString("pt-BR"));
-    }, 1200);
+    }
+  }, [clockSyncedAt]);
+
+  const doSync = async () => {
+    if (!device) return;
+    setSyncing(true);
+    setSyncError(null);
+    try {
+      await api.syncClock(device.sn);
+      // Se o REP nunca confirmar (offline, comando rejeitado sem ack, etc.),
+      // não deixa o spinner girando pra sempre.
+      setTimeout(() => setSyncing(false), 15000);
+    } catch (e: any) {
+      setSyncing(false);
+      setSyncError(e.message || "Falha ao enviar comando de sincronização");
+    }
   };
 
   const InfoRow = ({ k, v, mono }: { k: string; v: string; mono?: boolean }) => (
@@ -59,16 +80,19 @@ export function HomeScreen({ device, users, serverPort, totalLogs }: Props) {
       {/* Action row */}
       <div className="up-card p-4 flex flex-wrap items-center gap-3">
         <button className="btn-primary"><Plug size={14} /> Porta</button>
-        <button className={`btn-soft ${syncing ? "opacity-70" : ""}`} onClick={doSync}>
+        <button className={`btn-soft ${syncing ? "opacity-70" : ""}`} onClick={doSync} disabled={syncing || !device} title={!device ? "REP não encontrado" : undefined}>
           <RefreshCw size={14} className={syncing ? "animate-spin" : ""} />
-          Sincronizar hora
+          {syncing ? "Sincronizando…" : "Sincronizar hora"}
         </button>
         <div className="ml-auto flex items-center gap-2 text-[12.5px] text-ink-500">
           <span className="inline-flex items-center gap-1.5">
             <span className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-emerald-500 pulse-dot" : "bg-ink-400"}`} />
             {isOnline ? `Conectado · porta ${serverPort || "—"}` : "Offline"}
           </span>
-          {lastSync && <span className="text-ink-400">· última sincronização {lastSync}</span>}
+          {syncError && <span className="text-red-500">· {syncError}</span>}
+          {!syncError && clockSyncedAt && (
+            <span className="text-ink-400">· última sincronização {new Date(clockSyncedAt).toLocaleString("pt-BR")}</span>
+          )}
         </div>
       </div>
 
@@ -85,7 +109,11 @@ export function HomeScreen({ device, users, serverPort, totalLogs }: Props) {
             <div>
               <InfoRow k="IP do REP" v={device?.ip || "—"} mono />
               <InfoRow k="Porta servidor" v={serverPort || "—"} mono />
-              <InfoRow k="Hora" v={new Date().toLocaleString("pt-BR")} mono />
+              <InfoRow
+                k="Hora"
+                v={clockSyncedAt ? `Sincronizado em ${new Date(clockSyncedAt).toLocaleString("pt-BR")}` : "Nunca sincronizado"}
+                mono
+              />
               <InfoRow k="Local" v={isOnline ? "LAN" : "—"} />
             </div>
           </div>

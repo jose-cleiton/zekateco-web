@@ -80,6 +80,9 @@ export const api = {
   async rebootDevice(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/reboot`, { method: "POST" }));
   },
+  async syncClock(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/sync-clock`, { method: "POST" }));
+  },
   async lockDevice(sn: string, locked: boolean) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/lock`, {
       method: "POST",
