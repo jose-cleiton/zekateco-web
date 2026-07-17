@@ -417,7 +417,7 @@ app.get("/iclock/rtdata", async (req, res) => {
   if (SN) await updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
   if (type === "time") {
     const now = new Date();
-    const seconds = encodeZktecoDateTime(now);
+    const seconds = encodeZktecoDateTimeUTC(now);
     const serverTZ = getZonedOffset(now, APP_TIMEZONE);
     return res.type("text/plain").send(`DateTime=${seconds},ServerTZ=${serverTZ}`);
   }
@@ -1537,9 +1537,27 @@ function getZonedOffset(d: Date, timeZone: string): string {
 // Converte data/hora pro formato de segundos usado pelo ADMS
 // ("Security PUSH Communication Protocol", Apêndice 5 - Algorithm to Convert
 // Date to Seconds), no fuso configurado em APP_TIMEZONE — não é um
-// timestamp Unix.
+// timestamp Unix. Usado pro comando "SET OPTIONS DateTime=..." (9.5.1),
+// cuja anotação no protocolo não especifica GMT — manda a hora local direto.
 function encodeZktecoDateTime(d: Date): number {
   const { year, mon, day, hour, min, sec } = getZonedParts(d, APP_TIMEZONE);
+  return ((year - 2000) * 12 * 31 + (mon - 1) * 31 + day - 1) * (24 * 60 * 60) + (hour * 60 + min) * 60 + sec;
+}
+
+// Mesma conversão do Apêndice 5, mas em UTC — usada especificamente na
+// resposta de GET /iclock/rtdata?type=time, cujo protocolo documenta
+// explicitamente: "DateTime: the value means a Greenwich mean time".
+// Bug real já observado ao vivo: mandar hora LOCAL aqui (em vez de UTC) faz
+// o REP aplicar o offset do ServerTZ em cima de um valor que já estava
+// ajustado, resultando na hora duas vezes deslocada (ex: 08:57 virou 05:57
+// no aparelho, exatamente os -03:00 do ServerTZ aplicados de novo).
+function encodeZktecoDateTimeUTC(d: Date): number {
+  const year = d.getUTCFullYear();
+  const mon = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  const hour = d.getUTCHours();
+  const min = d.getUTCMinutes();
+  const sec = d.getUTCSeconds();
   return ((year - 2000) * 12 * 31 + (mon - 1) * 31 + day - 1) * (24 * 60 * 60) + (hour * 60 + min) * 60 + sec;
 }
 
