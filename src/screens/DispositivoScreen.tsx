@@ -253,9 +253,18 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
                 <div className="absolute top-1 left-1 bg-black/60 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded">#{m.idx}</div>
                 <div className="absolute bottom-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">{m.sizeKB}KB</div>
                 {m.status === "pending" && (
-                  <div className="absolute inset-0 flex items-center justify-center bg-black/30" title="Aguardando confirmação do REP">
-                    <Loader2 size={20} className="text-white animate-spin" />
-                  </div>
+                  <>
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/30" title="Aguardando confirmação do REP">
+                      <Loader2 size={20} className="text-white animate-spin" />
+                    </div>
+                    <button
+                      onClick={() => onForceRemoveMedia(m.idx)}
+                      title="Cancelar — remove da lista mesmo sem confirmação do REP"
+                      className="absolute bottom-1 right-1 bg-black/70 hover:bg-black text-white text-[9px] font-medium px-1.5 py-0.5 rounded"
+                    >
+                      Cancelar
+                    </button>
+                  </>
                 )}
                 {(m.status === "error" || m.status === "critical") && (
                   <>

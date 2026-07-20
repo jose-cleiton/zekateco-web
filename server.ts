@@ -1511,12 +1511,18 @@ app.post("/api/devices/:sn/media", mediaUpload.single("image"), async (req, res)
 // mesmo padrão do upload, pra não mostrar como removido se o REP rejeitar.
 //
 // ?force=true: remove só do nosso registro, sem esperar confirmação do REP.
-// Existe pra destravar imagens presas em "error" permanentemente — REPs cujo
-// firmware rejeita adpic sempre (visto ao vivo: Return=-11/-15 mesmo após
-// reboot e comandos serializados) nunca vão confirmar um delete, então sem
-// essa saída a imagem ficaria travada na UI pra sempre. Só aceito quando o
-// status atual já é error/critical — nunca sobre um "pending" real, que ainda
-// pode confirmar a qualquer momento.
+// Dois casos de uso:
+//   1. status=error/critical — destrava imagens presas permanentemente
+//      (ex: REP rejeitando o comando sem parar).
+//   2. status=pending — cancela um upload/delete ainda em andamento (o REP
+//      pode levar tempo real pra confirmar). Nesse caso:
+//      a) Se o comando em curso ainda não foi entregue (status=0), cancela
+//         antes de sair — e se for a fase DELETE-prévia de um upload, também
+//         remove o UPDATE enfileirado (pendingAdpicUpdates), senão a imagem
+//         seria aplicada mesmo depois do usuário ter cancelado.
+//      b) Se já foi entregue (status=1, aguardando ack) não dá pra "puxar de
+//         volta" — manda um DELETE Index=X best-effort (não rastreado) pro
+//         caso a imagem já tenha sido de fato gravada no REP.
 app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
   const { sn } = req.params;
   const idx = parseInt(req.params.idx);
@@ -1526,8 +1532,19 @@ app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
   if (!existing) return res.status(404).json({ error: "Imagem não encontrada" });
 
   if (force) {
-    if (existing.status !== "error" && existing.status !== "critical") {
-      return res.status(409).json({ error: "Remoção forçada só é permitida em imagens com falha (error/critical)" });
+    if (existing.status !== "error" && existing.status !== "critical" && existing.status !== "pending") {
+      return res.status(409).json({ error: "Remoção forçada só é permitida em imagens pendentes ou com falha" });
+    }
+    if (existing.status === "pending" && existing.command_id) {
+      const cmd = await prisma.command.findUnique({ where: { id: existing.command_id } });
+      if (cmd && cmd.status === 0) {
+        await prisma.command.delete({ where: { id: cmd.id } });
+        pendingAdpicUpdates.delete(cmd.id);
+      } else {
+        // Já entregue ou em andamento — não dá pra cancelar, manda delete
+        // best-effort caso a imagem já tenha sido aplicada no REP.
+        await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${idx}` } });
+      }
     }
     await prisma.deviceMedia.delete({ where: { sn_idx: { sn, idx } } });
     return res.json({ success: true, forced: true });
