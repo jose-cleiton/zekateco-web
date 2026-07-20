@@ -622,6 +622,11 @@ app.post("/iclock/cdata", async (req, res) => {
   res.type("text/plain").send("OK");
 });
 
+// Cache em memória da última resposta de "GET OPTIONS" por SN — diagnóstico
+// (firmware, capacidade) não precisa persistir no banco, só refletir no
+// dashboard enquanto o processo está de pé; um novo GET OPTIONS reemite.
+const deviceOptionsCache = new Map<string, { data: Record<string, string>; fetchedAt: Date }>();
+
 // 2b. Query Data — device responds to DATA QUERY commands (photos, users, transactions)
 app.post("/iclock/querydata", async (req, res) => {
   const { SN, tablename } = req.query;
@@ -693,6 +698,17 @@ app.post("/iclock/querydata", async (req, res) => {
       }
     }
     if (parsed > 0) console.log(`[ZK] querydata-transaction: saved ${parsed} logs from SN=${SN}`);
+  } else if (tablename === "options") {
+    // Resposta de "GET OPTIONS ~SerialNumber,FirmVer,..." (9.5.2 do protocolo)
+    // — corpo vem como "Key=Value,Key2=Value2" (vírgula, não tab/espaço).
+    const data: Record<string, string> = {};
+    for (const part of body.split(",")) {
+      const eq = part.indexOf("=");
+      if (eq > -1) data[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+    }
+    deviceOptionsCache.set(SN as string, { data, fetchedAt: new Date() });
+    console.log(`[ZK] querydata-options: recebido ${Object.keys(data).length} campos de SN=${SN}`);
+    broadcast({ type: "device_update", sn: SN as string });
   } else {
     console.log(`[ZK] querydata unknown tablename: ${tablename}`);
   }
@@ -1438,24 +1454,41 @@ async function enqueueAdpic(sn: string, index: number, buf: Buffer, ext: "jpg" |
 
 // Lista as imagens (adpics) cadastradas pra um REP. Cada item inclui um thumbnail
 // inline em base64 pra preview no dashboard sem requisição extra.
+// Mostra os 10 slots possíveis (1-10), não só os rastreados localmente —
+// adpic não tem DATA QUERY no protocolo (só push), então não temos como
+// saber o conteúdo real de um slot que nunca passou pelo dashboard (ex:
+// imagem de fábrica). Pra esses, expõe um placeholder "unknown" sem
+// thumbnail, mas com índice real — dá pra apagar mesmo sem preview, já que
+// DATA DELETE adpic Index=N funciona independente de sabermos o conteúdo.
 app.get("/api/devices/:sn/media", async (req, res) => {
   const { sn } = req.params;
   const items = await prisma.deviceMedia.findMany({
     where: { sn },
-    orderBy: { idx: "asc" },
     select: { idx: true, size: true, ext: true, thumbnail: true, created_at: true, status: true, error_detail: true },
   });
-  res.json(items.map((m) => ({
-    idx: m.idx,
-    sizeKB: Math.round(m.size / 1024),
-    ext: m.ext,
-    created_at: m.created_at.toISOString(),
-    thumbnail: m.thumbnail
-      ? `data:image/jpeg;base64,${m.thumbnail.toString("base64")}`
-      : null,
-    status: m.status,
-    error_detail: m.error_detail,
-  })));
+  const byIdx = new Map(items.map((m) => [m.idx, m]));
+  const slots = [];
+  for (let idx = 1; idx <= 10; idx++) {
+    const m = byIdx.get(idx);
+    if (m) {
+      slots.push({
+        idx: m.idx,
+        sizeKB: Math.round(m.size / 1024),
+        ext: m.ext,
+        created_at: m.created_at.toISOString(),
+        thumbnail: m.thumbnail ? `data:image/jpeg;base64,${m.thumbnail.toString("base64")}` : null,
+        status: m.status,
+        error_detail: m.error_detail,
+        tracked: true,
+      });
+    } else {
+      slots.push({
+        idx, sizeKB: null, ext: null, created_at: null, thumbnail: null,
+        status: "unknown" as const, error_detail: null, tracked: false,
+      });
+    }
+  }
+  res.json(slots);
 });
 
 // Envia uma imagem nova pro slideshow do REP. Se index não vier no body,
@@ -1529,7 +1562,15 @@ app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
   const force = req.query.force === "true";
   if (!idx) return res.status(400).json({ error: "Índice inválido" });
   const existing = await prisma.deviceMedia.findUnique({ where: { sn_idx: { sn, idx } } });
-  if (!existing) return res.status(404).json({ error: "Imagem não encontrada" });
+
+  // Slot sem registro local (nunca passou pelo dashboard) — não tem status
+  // pra rastrear, então manda o delete direto (fire-and-forget) sem criar
+  // linha em device_media. adpic não tem DATA QUERY, então isso é a única
+  // forma de tentar limpar um slot cujo conteúdo não conhecemos.
+  if (!existing) {
+    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${idx}` } });
+    return res.json({ success: true, commandId: c.id, tracked: false });
+  }
 
   if (force) {
     if (existing.status !== "error" && existing.status !== "critical" && existing.status !== "pending") {
@@ -1583,6 +1624,13 @@ app.post("/api/devices/:sn/userpics/clear", async (req, res) => {
 // some de fato quando o ack específico daquele índice confirmar — o wildcard
 // (*) é só um atalho de melhor esforço (o firmware pode rejeitar, caso já
 // documentado), quem garante o estado real são os deletes por índice.
+//
+// Varre 1-10 mesmo pra índices sem registro local (não rastreados por nós) —
+// não tem como "listar" o que já está no REP (adpic não tem DATA QUERY no
+// protocolo, só push), mas apagar um slot vazio retorna Return=0
+// (confirmado ao vivo), então uma varredura cega é segura e pega imagens
+// pré-existentes (ex: wallpaper de fábrica) que nunca passaram pelo
+// dashboard.
 app.post("/api/devices/:sn/media/clear", async (req, res) => {
   const { sn } = req.params;
   const device = await prisma.device.findUnique({ where: { sn } });
@@ -1593,13 +1641,14 @@ app.post("/api/devices/:sn/media/clear", async (req, res) => {
   cmds.push(wildcard.id);
   const trackedIdx = new Set(existing.map((m) => m.idx));
   for (let i = 1; i <= 10; i++) {
-    if (!trackedIdx.has(i)) continue; // não gasta comando/tracking em slot sem registro local
     const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${i}` } });
     cmds.push(c.id);
-    await prisma.deviceMedia.update({
-      where: { sn_idx: { sn, idx: i } },
-      data: { status: "pending", op_type: "delete", command_id: c.id, error_detail: null },
-    });
+    if (trackedIdx.has(i)) {
+      await prisma.deviceMedia.update({
+        where: { sn_idx: { sn, idx: i } },
+        data: { status: "pending", op_type: "delete", command_id: c.id, error_detail: null },
+      });
+    }
   }
   res.json({ success: true, queued: cmds.length });
 });
@@ -1615,6 +1664,30 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
   } catch (e: any) {
     res.status(502).json({ error: e.message });
   }
+});
+
+// Diagnóstico do REP — versão de firmware, capacidade, modelo. Somente leitura
+// (GET OPTIONS), sem risco de misconfigurar o aparelho. Chaves confirmadas no
+// protocolo oficial (9.5.2), testadas ao vivo.
+const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount";
+
+app.post("/api/devices/:sn/diagnostics/refresh", async (req, res) => {
+  const { sn } = req.params;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  try {
+    const c = await enqueueRepCommand(sn, `GET OPTIONS ${DIAGNOSTIC_KEYS}`);
+    res.json({ success: true, commandId: c.id });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+app.get("/api/devices/:sn/diagnostics", async (req, res) => {
+  const { sn } = req.params;
+  const cached = deviceOptionsCache.get(sn);
+  if (!cached) return res.json({ data: null, fetchedAt: null });
+  res.json({ data: cached.data, fetchedAt: cached.fetchedAt.toISOString() });
 });
 
 // Fuso do horário que deve ser aplicado ao REP — não confiar no TZ do

@@ -1,4 +1,4 @@
-import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check, Image as ImageIcon, Upload, Trash2, Plus, X } from "lucide-react";
+import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check, Image as ImageIcon, Upload, Trash2, Plus, X, Info } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import type { Device } from "../types";
@@ -31,6 +31,33 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   const [syncMessage, setSyncMessage] = useState<string>("");
   const [rebootState, setRebootState] = useState<"idle" | "sending" | "done" | "error">("idle");
   const [rebootMessage, setRebootMessage] = useState<string>("");
+  const [diagnostics, setDiagnostics] = useState<Record<string, string> | null>(null);
+  const [diagnosticsFetchedAt, setDiagnosticsFetchedAt] = useState<string | null>(null);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+
+  const loadDiagnostics = useCallback(async () => {
+    if (!sn) return;
+    try {
+      const r = await api.getDeviceDiagnostics(sn);
+      setDiagnostics(r.data);
+      setDiagnosticsFetchedAt(r.fetchedAt);
+    } catch { /* silencioso — card mostra "—" se não tiver dado ainda */ }
+  }, [sn]);
+
+  useEffect(() => { loadDiagnostics(); }, [loadDiagnostics]);
+
+  const onRefreshDiagnostics = async () => {
+    if (!sn) return;
+    setDiagnosticsLoading(true);
+    try {
+      await api.refreshDeviceDiagnostics(sn);
+      // Resposta do REP chega assíncrona via GET OPTIONS; espera um pouco e recarrega.
+      setTimeout(async () => { await loadDiagnostics(); setDiagnosticsLoading(false); }, 6000);
+    } catch (e: any) {
+      setDiagnosticsLoading(false);
+      alert(e.message || "Erro ao consultar diagnóstico");
+    }
+  };
 
   const onSyncDevices = async () => {
     setSyncState("sending");
@@ -75,9 +102,10 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   const isSyncing = syncState === "sending" || syncState === "waiting";
 
   type MediaItem = {
-    idx: number; sizeKB: number; ext: string; created_at: string; thumbnail: string | null;
-    status: "pending" | "sent" | "success" | "error" | "critical";
+    idx: number; sizeKB: number | null; ext: string | null; created_at: string | null; thumbnail: string | null;
+    status: "pending" | "sent" | "success" | "error" | "critical" | "unknown";
     error_detail: string | null;
+    tracked: boolean;
   };
   const mediaInput = useRef<HTMLInputElement>(null);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
@@ -96,7 +124,7 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   // lista quando o backend confirmar sucesso/erro de um upload/delete de adpic,
   // em vez de assumir otimisticamente que o comando enfileirado deu certo.
   useWebSocket((msg) => {
-    if (msg.type === "device_update" && msg.sn === sn) loadMedia();
+    if (msg.type === "device_update" && msg.sn === sn) { loadMedia(); loadDiagnostics(); }
   }, sn);
 
   const onPickMedia = () => mediaInput.current?.click();
@@ -176,6 +204,36 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
       </div>
 
       <div className="up-card p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white">Diagnóstico</h3>
+          <button
+            className="btn-soft inline-flex items-center gap-1.5 text-[12.5px]"
+            disabled={!isOnline || diagnosticsLoading}
+            onClick={onRefreshDiagnostics}
+          >
+            {diagnosticsLoading ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+            {diagnosticsLoading ? "Consultando..." : "Consultar"}
+          </button>
+        </div>
+        {!diagnostics ? (
+          <div className="py-6 text-center text-[13px] text-ink-400 border border-dashed border-ink-200 dark:border-[#2A3140] rounded">
+            Clique em "Consultar" pra ler versão de firmware e capacidade do REP.
+          </div>
+        ) : (
+          <>
+            <SettingRow icon={Info} label="Firmware" control={<span className="font-mono tabular text-[13px]">{diagnostics.FirmVer || "—"}</span>} />
+            <SettingRow icon={Cpu} label="Nome do dispositivo" control={<span className="text-[13px]">{diagnostics["~DeviceName"] || "—"}</span>} />
+            <SettingRow icon={Info} label="Modelo" control={<span className="text-[13px]">{diagnostics.MachineType || "—"}</span>} />
+            <SettingRow icon={Info} label="Capacidade máx. de usuários" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxUserCount"] || "—"}</span>} />
+            <SettingRow icon={Info} label="Capacidade máx. de registros" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxAttLogCount"] || "—"}</span>} />
+            {diagnosticsFetchedAt && (
+              <div className="text-[11px] text-ink-400 mt-2">Consultado em {new Date(diagnosticsFetchedAt).toLocaleString("pt-BR")}</div>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="up-card p-5">
         <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white mb-3">Servidor</h3>
         <SettingRow icon={Globe} label="Porta ADMS" control={<span className="font-mono tabular text-[13px]">{serverPort || "—"}</span>} />
         {!readOnly && (
@@ -200,7 +258,9 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
         <div className="flex items-center mb-3 gap-2">
           <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white flex-1">
             Aparência do REP
-            <span className="ml-2 text-[12px] font-normal text-ink-500">{mediaList.length} {mediaList.length === 1 ? "imagem" : "imagens"}</span>
+            <span className="ml-2 text-[12px] font-normal text-ink-500">
+              {mediaList.filter(m => m.tracked).length} conhecida{mediaList.filter(m => m.tracked).length === 1 ? "" : "s"} · 10 slots
+            </span>
           </h3>
           <button
             className="btn-soft inline-flex items-center gap-1.5 text-[12.5px]"
@@ -212,7 +272,7 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
           </button>
           <button
             className="btn-outline inline-flex items-center gap-1.5 text-[12.5px]"
-            disabled={!isOnline || mediaList.length === 0}
+            disabled={!isOnline}
             onClick={onClearMedia}
           >
             <Trash2 size={12} /> Limpar todas
@@ -237,21 +297,18 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
         {mediaError && (
           <div className="mb-2 p-2 rounded bg-red-50 border border-red-200 text-[12px] text-red-700">{mediaError}</div>
         )}
-        {mediaList.length === 0 ? (
-          <div className="py-8 text-center text-[13px] text-ink-400 border border-dashed border-ink-200 dark:border-[#2A3140] rounded">
-            Nenhuma imagem cadastrada. Clique em "Adicionar imagem".
-          </div>
-        ) : (
-          <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+        <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
             {mediaList.map((m) => (
               <div key={m.idx} className={`relative group rounded border overflow-hidden ${
                 m.status === "error" || m.status === "critical" ? "border-red-300" : "border-ink-200 dark:border-[#222A36]"
-              }`}>
+              } ${m.status === "unknown" ? "border-dashed opacity-60" : ""}`}>
                 {m.thumbnail
                   ? <img src={m.thumbnail} alt={`Slot ${m.idx}`} className={`w-full h-32 object-cover ${m.status === "pending" ? "opacity-50" : ""}`} />
                   : <div className="w-full h-32 bg-ink-100 dark:bg-[#1A2030] flex items-center justify-center text-ink-400"><ImageIcon size={20} /></div>}
                 <div className="absolute top-1 left-1 bg-black/60 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded">#{m.idx}</div>
-                <div className="absolute bottom-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">{m.sizeKB}KB</div>
+                {m.tracked
+                  ? <div className="absolute bottom-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">{m.sizeKB}KB</div>
+                  : <div className="absolute bottom-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded" title="Slot pode ter uma imagem que nunca passou pelo dashboard (adpic não tem consulta no protocolo)">desconhecido</div>}
                 {m.status === "pending" && (
                   <>
                     <div className="absolute inset-0 flex items-center justify-center bg-black/30" title="Aguardando confirmação do REP">
@@ -293,8 +350,7 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
                 </button>
               </div>
             ))}
-          </div>
-        )}
+        </div>
         <input type="file" ref={mediaInput} accept="image/*" className="hidden" onChange={onMediaChange} />
       </div>
       )}

@@ -108,4 +108,10 @@ export const api = {
   async clearDeviceUserpics(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/userpics/clear`, { method: "POST" }));
   },
+  async refreshDeviceDiagnostics(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/diagnostics/refresh`, { method: "POST" }));
+  },
+  async getDeviceDiagnostics(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/diagnostics`)) as Promise<{ data: Record<string, string> | null; fetchedAt: string | null }>;
+  },
 };
