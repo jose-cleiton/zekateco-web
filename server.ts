@@ -1406,26 +1406,32 @@ async function optimizeForRepMedia(input: Buffer, maxKB = 200): Promise<Buffer> 
 
 const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
-// Enfileira DELETE + UPDATE do mesmo slot, mas SERIALIZADO: manda o UPDATE só
-// depois do ack do DELETE (Return de qualquer valor — só precisamos que o REP
-// termine de processar o primeiro antes do segundo chegar). Antes disso, os
-// dois comandos eram criados de uma vez e podiam ser entregues nas duas
-// próximas chamadas de getrequest antes do ack do primeiro voltar — condição
-// de corrida em cima do mesmo arquivo (ad_picX.ext) no REP, que se
-// manifestava como Return=-11 ("Incorrect data parameter", Apêndice 1 do
-// protocolo) de forma intermitente, mesmo com comando sintaticamente
-// idêntico a uma tentativa que tinha funcionado segundos antes.
+// IMPORTANTE — casing dos parâmetros: o PDF genérico do protocolo documenta
+// os campos de "adpic" em minúsculo (index=/size=/extension=/content=), mas
+// esse firmware (mesmo modelo que já usa PIN=/Type=/Index=/Size=/Content=
+// maiúsculo no comando BIOPHOTO) rejeita a versão minúscula com
+// Return=-11 ("Incorrect data parameter") em 100% dos testes ao vivo —
+// incluindo depois de reboot, com imagem válida, em slot novo. Confirmado
+// ao vivo em 2026-07-20: só com Index=/Size=/Extension=/Content=
+// (maiúsculo) o REP aceita (Return=0) e a imagem realmente aparece no
+// slideshow do aparelho. Ver docs/decisao-wallpaper-adpic-nao-suportado.md
+// pro histórico completo da investigação (matinha uma conclusão diferente
+// antes dessa descoberta).
+//
+// Serialização DELETE→UPDATE mantida por ainda ser uma boa prática (evita
+// os dois comandos competindo pelo mesmo arquivo no REP), mesmo não tendo
+// sido a causa raiz do Return=-11.
 const pendingAdpicUpdates = new Map<number, { sn: string; idx: number; buf: Buffer; ext: "jpg" | "png" }>();
 
 async function enqueueAdpicUpdateNow(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
   const content = buf.toString("base64");
   return prisma.command.create({
-    data: { sn, command: `DATA UPDATE adpic index=${index}\tsize=${buf.length}\textension=${ext}\tcontent=${content}` },
+    data: { sn, command: `DATA UPDATE adpic Index=${index}\tSize=${buf.length}\tExtension=${ext}\tContent=${content}` },
   });
 }
 
 async function enqueueAdpic(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
-  const del = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${index}` } });
+  const del = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${index}` } });
   pendingAdpicUpdates.set(del.id, { sn, idx: index, buf, ext });
   return del;
 }
@@ -1527,7 +1533,7 @@ app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
     return res.json({ success: true, forced: true });
   }
 
-  const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${idx}` } });
+  const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${idx}` } });
   await prisma.deviceMedia.update({
     where: { sn_idx: { sn, idx } },
     data: { status: "pending", op_type: "delete", command_id: c.id, error_detail: null },
@@ -1571,7 +1577,7 @@ app.post("/api/devices/:sn/media/clear", async (req, res) => {
   const trackedIdx = new Set(existing.map((m) => m.idx));
   for (let i = 1; i <= 10; i++) {
     if (!trackedIdx.has(i)) continue; // não gasta comando/tracking em slot sem registro local
-    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${i}` } });
+    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${i}` } });
     cmds.push(c.id);
     await prisma.deviceMedia.update({
       where: { sn_idx: { sn, idx: i } },
