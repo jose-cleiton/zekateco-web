@@ -468,7 +468,7 @@ app.get("/iclock/cdata", async (req, res) => {
 
     if (device) {
       return res.type("text/plain").send(
-        `registry=ok\nRegistryCode=REG_${SN}_xyz789\nServerVersion=3.1.2\nPushProtVer=3.1.2\nRequestDelay=30\nTransTimes=00:00;14:00\nTransInterval=1\nRealtime=1\nBioPhotoFun=1\nBioDataFun=1\nEncryption=None`
+        `registry=ok\nRegistryCode=REG_${SN}_xyz789\nServerVersion=3.1.2\nPushProtVer=3.1.2\nRequestDelay=5\nTransTimes=00:00;14:00\nTransInterval=1\nRealtime=1\nBioPhotoFun=1\nBioDataFun=1\nEncryption=None`
       );
     }
   }
