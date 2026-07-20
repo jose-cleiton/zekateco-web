@@ -7,15 +7,6 @@ export interface UserFormValue {
   privilege: number;
   password: string;
   card: string;
-  // Campos extras só de UI (não persistem no backend ainda)
-  depto?: string;
-  turno?: string;
-  faixa?: string;
-  grp?: string;
-  modo?: string;
-  aniversario?: string;
-  inicio?: string;
-  fim?: string;
 }
 
 const FaceIcon = ({ size = 140 }: { size?: number }) => (
@@ -62,9 +53,6 @@ export function UserForm({ value, onChange, mode, photoUrl, onPickPhoto, onDelet
         <Field label="Nome">
           <input className="field" value={value.name} onChange={e => set("name", e.target.value)} placeholder="Nome completo" />
         </Field>
-        <Field label="Depto">
-          <input className="field" value={value.depto ?? ""} onChange={e => set("depto", e.target.value)} placeholder="(somente UI)" />
-        </Field>
         <Field label="Cartão">
           <div className="flex gap-2">
             <input className="field flex-1 tabular" value={value.card} onChange={e => set("card", e.target.value)} placeholder="0" />
@@ -82,35 +70,7 @@ export function UserForm({ value, onChange, mode, photoUrl, onPickPhoto, onDelet
       </div>
 
       <div className="space-y-3">
-        <Field label="Turno">
-          <input className="field" value={value.turno ?? ""} onChange={e => set("turno", e.target.value)} placeholder="(somente UI)" />
-        </Field>
-        <Field label="Faixa">
-          <input className="field" value={value.faixa ?? ""} onChange={e => set("faixa", e.target.value)} placeholder="(somente UI)" />
-        </Field>
-        <Field label="GRP">
-          <input className="field" value={value.grp ?? ""} onChange={e => set("grp", e.target.value)} placeholder="(somente UI)" />
-        </Field>
-        <Field label="Modo de verificação pessoal">
-          <select className="field" value={value.modo ?? ""} onChange={e => set("modo", e.target.value)}>
-            <option value="">Modo de verificação do dispositivo</option>
-            <option value="Face">Face</option>
-            <option value="Senha">Senha</option>
-            <option value="Cartão">Cartão</option>
-            <option value="Multi">Multi (Face + Senha)</option>
-          </select>
-        </Field>
-        <Field label="Aniversário">
-          <input type="date" className="field" value={value.aniversario ?? ""} onChange={e => set("aniversario", e.target.value)} />
-        </Field>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Início">
-            <input type="date" className="field" value={value.inicio ?? ""} onChange={e => set("inicio", e.target.value)} />
-          </Field>
-          <Field label="Fim">
-            <input type="date" className="field" value={value.fim ?? ""} onChange={e => set("fim", e.target.value)} />
-          </Field>
-        </div>
+        {/* Decorative fields removed — no backend feature associated yet. See docs/decisao-modo-verificacao-pessoal.md */}
       </div>
 
       <div className="flex flex-col items-center gap-3">

@@ -17,7 +17,6 @@ export function EditUserScreen({ user, onSaved, onCancel }: Props) {
     privilege: user.privilege,
     password: user.password ?? "",
     card: user.card ?? "",
-    depto: "", turno: "", faixa: "", grp: "", modo: "", aniversario: "", inicio: "", fim: "",
   });
   const [pickedPhoto, setPickedPhoto] = useState<File | null>(null);
   const [pickedPreview, setPickedPreview] = useState<string | undefined>(user.photo_url);

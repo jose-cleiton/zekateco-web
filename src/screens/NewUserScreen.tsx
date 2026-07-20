@@ -11,7 +11,6 @@ interface Props {
 export function NewUserScreen({ onSaved, onCancel }: Props) {
   const [v, setV] = useState<UserFormValue>({
     pin: "", name: "", privilege: 0, password: "", card: "",
-    depto: "", turno: "", faixa: "", grp: "", modo: "", aniversario: "", inicio: "", fim: "",
   });
   const [pickedPhoto, setPickedPhoto] = useState<File | null>(null);
   const [pickedPreview, setPickedPreview] = useState<string | undefined>(undefined);
