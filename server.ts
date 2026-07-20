@@ -485,7 +485,11 @@ async function insertLogIgnoreDup(
   verifyType: number,
 ): Promise<number | null> {
   try {
-    const t = time ? new Date(time) : null;
+    // Strings ISO (terminam em "Z") já vêm em UTC correto, do decode do
+    // time_second proprietário (Apêndice 5/6) — usar direto. Strings "YYYY-MM-DD
+    // HH:mm:ss" (rtlog/ATTLOG) são hora LOCAL do REP e precisam da conversão
+    // explícita, senão o fuso do container (UTC) interpreta errado.
+    const t = time ? (time.endsWith("Z") ? new Date(time) : parseDeviceLocalTime(time)) : null;
     const created = await prisma.log.create({
       data: { sn, pin, time: t, status, verify_type: verifyType },
     });
@@ -1508,19 +1512,6 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
 // a hora em UTC e mandava isso pro REP como se fosse horário local).
 const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Sao_Paulo";
 
-// Extrai ano/mês/dia/hora/min/seg de uma Date NO FUSO configurado,
-// independente do fuso do processo Node.
-function getZonedParts(d: Date, timeZone: string) {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false,
-  }).formatToParts(d);
-  const get = (type: string) => parseInt(parts.find((p) => p.type === type)!.value);
-  return { year: get("year"), mon: get("month"), day: get("day"), hour: get("hour") % 24, min: get("minute"), sec: get("second") };
-}
-
 // Retorna o offset UTC do fuso configurado no formato "+HHMM"/"-HHMM"
 // esperado pelo campo ServerTZ do protocolo ADMS.
 function getZonedOffset(d: Date, timeZone: string): string {
@@ -1534,23 +1525,40 @@ function getZonedOffset(d: Date, timeZone: string): string {
   return `${sign}${hh}${mm}`;
 }
 
-// Converte data/hora pro formato de segundos usado pelo ADMS
-// ("Security PUSH Communication Protocol", Apêndice 5 - Algorithm to Convert
-// Date to Seconds), no fuso configurado em APP_TIMEZONE — não é um
-// timestamp Unix. Usado pro comando "SET OPTIONS DateTime=..." (9.5.1),
-// cuja anotação no protocolo não especifica GMT — manda a hora local direto.
-function encodeZktecoDateTime(d: Date): number {
-  const { year, mon, day, hour, min, sec } = getZonedParts(d, APP_TIMEZONE);
-  return ((year - 2000) * 12 * 31 + (mon - 1) * 31 + day - 1) * (24 * 60 * 60) + (hour * 60 + min) * 60 + sec;
+function getZonedOffsetMinutes(d: Date, timeZone: string): number {
+  const offset = getZonedOffset(d, timeZone);
+  const sign = offset[0] === "-" ? -1 : 1;
+  return sign * (parseInt(offset.slice(1, 3)) * 60 + parseInt(offset.slice(3, 5)));
 }
 
-// Mesma conversão do Apêndice 5, mas em UTC — usada especificamente na
-// resposta de GET /iclock/rtdata?type=time, cujo protocolo documenta
-// explicitamente: "DateTime: the value means a Greenwich mean time".
-// Bug real já observado ao vivo: mandar hora LOCAL aqui (em vez de UTC) faz
-// o REP aplicar o offset do ServerTZ em cima de um valor que já estava
-// ajustado, resultando na hora duas vezes deslocada (ex: 08:57 virou 05:57
-// no aparelho, exatamente os -03:00 do ServerTZ aplicados de novo).
+// O REP manda o horário da batida em texto puro no formato local dele
+// ("YYYY-MM-DD HH:mm:ss", sem indicação de fuso) no rtlog/ATTLOG — igual ao
+// que aparece no visor físico do aparelho. `new Date(string)` sem fuso
+// explícito é interpretado no fuso do PROCESSO Node, não em APP_TIMEZONE; e
+// como o container roda em UTC, esse horário (já local) era tratado como se
+// fosse UTC — bug real visto ao vivo: REP mostra a hora certa na tela, mas o
+// registro salvo (e exibido no dashboard) sai ~3h atrasado (o fuso é
+// subtraído de novo ao converter pra exibição no navegador).
+function parseDeviceLocalTime(s: string): Date | null {
+  const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const [y, mo, d, h, mi, se] = m.slice(1).map(Number);
+  const naiveUTC = Date.UTC(y, mo - 1, d, h, mi, se);
+  const offsetMin = getZonedOffsetMinutes(new Date(naiveUTC), APP_TIMEZONE);
+  return new Date(naiveUTC - offsetMin * 60_000);
+}
+
+// Converte data/hora pro formato de segundos usado pelo ADMS ("Security
+// PUSH Communication Protocol", Apêndice 5 - Algorithm to Convert Date to
+// Seconds), em UTC — usada tanto pro "SET OPTIONS DateTime=..." (9.5.1)
+// quanto pela resposta de GET /iclock/rtdata?type=time. Ambos os canais
+// interpretam o valor como GMT (o protocolo documenta isso explicitamente
+// pro rtdata: "DateTime: the value means a Greenwich mean time"). Mandar
+// hora LOCAL em qualquer um dos dois faz o REP aplicar o offset do
+// ServerTZ em cima de um valor que já estava ajustado — bug real já visto
+// duas vezes ao vivo: relógio da tela 3h errado (rtdata) e, depois de
+// corrigir só o rtdata, batidas de ponto carimbadas 3h atrasadas (RTC
+// interno, usado pelo SET OPTIONS DateTime).
 function encodeZktecoDateTimeUTC(d: Date): number {
   const year = d.getUTCFullYear();
   const mon = d.getUTCMonth() + 1;
@@ -1571,7 +1579,14 @@ app.post("/api/devices/:sn/sync-clock", async (req, res) => {
   const device = await prisma.device.findUnique({ where: { sn } });
   if (!device) return res.status(404).json({ error: "REP não encontrado" });
   try {
-    const seconds = encodeZktecoDateTime(new Date());
+    // Mesmo bug já corrigido no /iclock/rtdata: o RTC interno do REP (usado
+    // pra carimbar os registros de ponto) também interpreta este DateTime
+    // como GMT, não hora local — mandar hora local aqui fazia o relógio da
+    // tela parecer certo (via rtdata, já em UTC) mas as batidas de ponto
+    // saírem carimbadas ~3h atrasadas (RTC ficava com o offset aplicado
+    // duas vezes). Testado ao vivo: usuário bateu ponto e o horário do
+    // registro saiu errado mesmo com o relógio da tela mostrando a hora certa.
+    const seconds = encodeZktecoDateTimeUTC(new Date());
     const c = await enqueueRepCommand(sn, `SET OPTIONS DateTime=${seconds}`);
     res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
   } catch (e: any) {
