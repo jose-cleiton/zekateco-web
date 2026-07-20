@@ -38,12 +38,12 @@ export function useAppState(sn?: string) {
       setLogs(prev => [msg.log, ...prev].slice(0, 100));
       setRealtimeLogs(prev => [msg.log, ...prev].slice(0, 200));
     } else if (msg.type === "device_update") {
+      // Always refresh to get latest state, but if clock_synced_at is in the message,
+      // update it immediately so HomeScreen spinner stops without waiting for refresh
       if (msg.clock_synced_at !== undefined) {
-        // Update device directly for clock sync to stop the spinner immediately
         setDevices(prev => prev.map(d => d.sn === msg.sn ? { ...d, clock_synced_at: msg.clock_synced_at } : d));
-      } else {
-        refresh();
       }
+      refresh();
     } else if (msg.type === "users_updated") {
       refresh();
     } else if (msg.type === "photo_op_update") {

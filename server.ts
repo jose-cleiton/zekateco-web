@@ -199,6 +199,7 @@ wss.on("connection", (client, req) => {
 });
 
 function broadcast(data: any) {
+  console.log(`[WS] Broadcast to ${wss.clients.size} clients:`, JSON.stringify(data).slice(0, 80));
   wss.clients.forEach((client) => {
     if (client.readyState !== WebSocket.OPEN) return;
     const room = (client as any).sn as string | undefined;
@@ -1190,7 +1191,9 @@ app.post("/iclock/devicecmd", async (req, res) => {
       await enqueueNextHistoricChunk(cmd.sn!);
     }
     if (ret >= 0 && cmd?.command?.startsWith("SET OPTIONS DateTime=")) {
+      console.log(`[ZK] Clock sync ack for SN=${cmd.sn}, updating clock_synced_at`);
       const updated = await prisma.device.update({ where: { sn: cmd.sn! }, data: { clock_synced_at: new Date() } });
+      console.log(`[ZK] Broadcasting device_update for clock_synced_at: sn=${cmd.sn}, time=${updated.clock_synced_at}`);
       broadcast({ type: "device_update", sn: cmd.sn!, clock_synced_at: updated.clock_synced_at?.toISOString() });
     }
 
