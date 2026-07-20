@@ -59,6 +59,31 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
     }
   };
 
+  const [idleSeconds, setIdleSeconds] = useState("30");
+  const [idleState, setIdleState] = useState<"idle" | "sending" | "done" | "error">("idle");
+  const [idleMessage, setIdleMessage] = useState<string>("");
+
+  const onSetIdleTime = async () => {
+    if (!sn) return;
+    const secs = parseInt(idleSeconds);
+    if (!Number.isFinite(secs) || secs < 3 || secs > 3600) {
+      setIdleState("error");
+      setIdleMessage("Use um valor entre 3 e 3600 segundos");
+      return;
+    }
+    setIdleState("sending");
+    setIdleMessage("Enviando...");
+    try {
+      await api.setIdleTime(sn, secs);
+      setIdleState("done");
+      setIdleMessage("Enviado — confirme na tela do REP");
+      setTimeout(() => { setIdleState("idle"); setIdleMessage(""); }, 4000);
+    } catch (e: any) {
+      setIdleState("error");
+      setIdleMessage(e.message || "Erro ao enviar");
+    }
+  };
+
   const onSyncDevices = async () => {
     setSyncState("sending");
     setSyncMessage("Enviando comando ao REP...");
@@ -249,6 +274,28 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
                 {rebootState === "done" && <Check size={12} className="text-emerald-600" />}
                 {rebootState === "sending" ? "Enviando..." : rebootState === "done" ? "Enfileirado" : "Reiniciar"}
               </button>
+            } />
+        )}
+        {!readOnly && (
+          <SettingRow icon={Clock} label="Tempo de ociosidade"
+            hint={idleMessage || 'Segundos até o REP entrar em modo idle/slideshow (chave "IdleTime", não documentada oficialmente — confirmada por teste ao vivo)'}
+            control={
+              <div className="flex items-center gap-2">
+                <input
+                  type="number" min={3} max={3600} value={idleSeconds}
+                  onChange={e => setIdleSeconds(e.target.value)}
+                  className="field w-20 tabular text-[13px]"
+                />
+                <button
+                  className="btn-outline inline-flex items-center gap-1.5"
+                  onClick={onSetIdleTime}
+                  disabled={!isOnline || idleState === "sending"}
+                >
+                  {idleState === "sending" && <Loader2 size={12} className="animate-spin" />}
+                  {idleState === "done" && <Check size={12} className="text-emerald-600" />}
+                  {idleState === "sending" ? "Enviando..." : "Aplicar"}
+                </button>
+              </div>
             } />
         )}
       </div>

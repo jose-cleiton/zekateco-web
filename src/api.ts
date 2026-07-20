@@ -83,6 +83,13 @@ export const api = {
   async syncClock(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/sync-clock`, { method: "POST" }));
   },
+  async setIdleTime(sn: string, seconds: number) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/idle-time`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seconds }),
+    }));
+  },
   async lockDevice(sn: string, locked: boolean) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/lock`, {
       method: "POST",

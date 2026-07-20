@@ -1778,6 +1778,30 @@ app.post("/api/devices/:sn/sync-clock", async (req, res) => {
   }
 });
 
+// Tempo de ociosidade antes do REP entrar em modo idle/slideshow. Chave
+// "IdleTime" não está documentada no protocolo genérico (nem em nenhuma
+// fonte pública encontrada) — confirmada ao vivo por teste empírico
+// cauteloso, um comando isolado por vez, verificando que o REP continuava
+// respondendo entre cada tentativa (risco de brick documentado no
+// projeto). Return=0 sozinho não bastava como prova (firmware pode aceitar
+// chave desconhecida sem fazer nada) — só foi confirmada real após
+// observar visualmente o comportamento mudar na tela do REP.
+app.post("/api/devices/:sn/idle-time", express.json(), async (req, res) => {
+  const { sn } = req.params;
+  const seconds = parseInt(req.body?.seconds);
+  if (!Number.isFinite(seconds) || seconds < 3 || seconds > 3600) {
+    return res.status(400).json({ error: "Tempo inválido (use entre 3 e 3600 segundos)" });
+  }
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  try {
+    const c = await enqueueRepCommand(sn, `SET OPTIONS IdleTime=${seconds}`);
+    res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
 app.get("/api/users", async (_req, res) => {
   const users = await prisma.user.findMany({
     select: {
