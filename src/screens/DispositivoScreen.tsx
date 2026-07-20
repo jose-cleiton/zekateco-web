@@ -124,6 +124,17 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
     catch (e: any) { setMediaError(e.message || "Erro ao remover"); }
   };
 
+  // Só disponível pra imagens já marcadas como "error"/"critical" — remove só
+  // do nosso registro, sem confirmação do REP. Existe pra destravar imagens
+  // presas quando o REP nunca vai confirmar (ex: firmware sem suporte real a
+  // adpic, como visto ao vivo — Return=-11 persistente mesmo após reboot).
+  const onForceRemoveMedia = async (idx: number) => {
+    if (!sn) return;
+    if (!confirm(`Remover o slot ${idx} só do nosso registro? Isso NÃO tenta apagar do REP de novo — use se o REP nunca confirma essa operação.`)) return;
+    try { await api.deleteDeviceMedia(sn, idx, true); await loadMedia(); }
+    catch (e: any) { setMediaError(e.message || "Erro ao remover"); }
+  };
+
   const onClearMedia = async () => {
     if (!sn) return;
     if (!confirm("Apagar TODAS as imagens do slideshow do REP? (incluindo as de fábrica)")) return;
@@ -247,12 +258,21 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
                   </div>
                 )}
                 {(m.status === "error" || m.status === "critical") && (
-                  <div
-                    className="absolute inset-x-0 top-0 bg-red-600 text-white text-[10px] font-semibold px-1.5 py-0.5 text-center"
-                    title={m.error_detail ? `Falhou: ${m.error_detail}` : "Falhou no REP"}
-                  >
-                    Falhou no REP
-                  </div>
+                  <>
+                    <div
+                      className="absolute inset-x-0 top-0 bg-red-600 text-white text-[10px] font-semibold px-1.5 py-0.5 text-center"
+                      title={m.error_detail ? `Falhou: ${m.error_detail}` : "Falhou no REP"}
+                    >
+                      Falhou no REP
+                    </div>
+                    <button
+                      onClick={() => onForceRemoveMedia(m.idx)}
+                      title="Remover da lista sem confirmação do REP"
+                      className="absolute bottom-1 right-1 bg-black/70 hover:bg-black text-white text-[9px] font-medium px-1.5 py-0.5 rounded"
+                    >
+                      Remover da lista
+                    </button>
+                  </>
                 )}
                 <button
                   onClick={() => onDeleteMedia(m.idx)}

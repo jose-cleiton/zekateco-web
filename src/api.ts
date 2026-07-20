@@ -99,8 +99,8 @@ export const api = {
     if (index) fd.append("index", String(index));
     return jsonOrThrow(await fetch(`/api/devices/${sn}/media`, { method: "POST", body: fd }));
   },
-  async deleteDeviceMedia(sn: string, idx: number) {
-    return jsonOrThrow(await fetch(`/api/devices/${sn}/media/${idx}`, { method: "DELETE" }));
+  async deleteDeviceMedia(sn: string, idx: number, force = false) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/media/${idx}${force ? "?force=true" : ""}`, { method: "DELETE" }));
   },
   async clearDeviceMedia(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/media/clear`, { method: "POST" }));

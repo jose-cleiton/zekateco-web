@@ -1227,6 +1227,19 @@ app.post("/iclock/devicecmd", async (req, res) => {
       }
     }
 
+    // Fase 1 (DELETE) de um upload de adpic — este ack só libera o UPDATE
+    // real, não finaliza o status do DeviceMedia (que continua "pending"
+    // até o ack do UPDATE que vamos enfileirar agora).
+    if (pendingAdpicUpdates.has(cmdId)) {
+      const payload = pendingAdpicUpdates.get(cmdId)!;
+      pendingAdpicUpdates.delete(cmdId);
+      const updateCmd = await enqueueAdpicUpdateNow(payload.sn, payload.idx, payload.buf, payload.ext);
+      await prisma.deviceMedia.updateMany({
+        where: { sn: payload.sn, idx: payload.idx, command_id: cmdId },
+        data: { command_id: updateCmd.id },
+      });
+    }
+
     // Wallpaper (adpic) — mesma lógica de sucesso/erro do photoOp/userOp acima.
     // Sem isso, DeviceMedia ficava marcado como aplicado mesmo quando o REP
     // rejeitava o comando (Return=-11 visto ao vivo) — bug DEV-47.
@@ -1393,15 +1406,28 @@ async function optimizeForRepMedia(input: Buffer, maxKB = 200): Promise<Buffer> 
 
 const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
-// Enfileira upload de adpic com DELETE prévio do mesmo slot, garantindo
-// substituição limpa quando o REP já tem imagem no índice.
-async function enqueueAdpic(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
-  await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${index}` } });
+// Enfileira DELETE + UPDATE do mesmo slot, mas SERIALIZADO: manda o UPDATE só
+// depois do ack do DELETE (Return de qualquer valor — só precisamos que o REP
+// termine de processar o primeiro antes do segundo chegar). Antes disso, os
+// dois comandos eram criados de uma vez e podiam ser entregues nas duas
+// próximas chamadas de getrequest antes do ack do primeiro voltar — condição
+// de corrida em cima do mesmo arquivo (ad_picX.ext) no REP, que se
+// manifestava como Return=-11 ("Incorrect data parameter", Apêndice 1 do
+// protocolo) de forma intermitente, mesmo com comando sintaticamente
+// idêntico a uma tentativa que tinha funcionado segundos antes.
+const pendingAdpicUpdates = new Map<number, { sn: string; idx: number; buf: Buffer; ext: "jpg" | "png" }>();
+
+async function enqueueAdpicUpdateNow(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
   const content = buf.toString("base64");
-  const c = await prisma.command.create({
+  return prisma.command.create({
     data: { sn, command: `DATA UPDATE adpic index=${index}\tsize=${buf.length}\textension=${ext}\tcontent=${content}` },
   });
-  return c;
+}
+
+async function enqueueAdpic(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
+  const del = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${index}` } });
+  pendingAdpicUpdates.set(del.id, { sn, idx: index, buf, ext });
+  return del;
 }
 
 // Lista as imagens (adpics) cadastradas pra um REP. Cada item inclui um thumbnail
@@ -1477,12 +1503,30 @@ app.post("/api/devices/:sn/media", mediaUpload.single("image"), async (req, res)
 // Remove uma imagem específica do REP por índice. Fica "pending" (some da UI
 // como resultado pendente, não desaparece de vez) até o ack confirmar —
 // mesmo padrão do upload, pra não mostrar como removido se o REP rejeitar.
+//
+// ?force=true: remove só do nosso registro, sem esperar confirmação do REP.
+// Existe pra destravar imagens presas em "error" permanentemente — REPs cujo
+// firmware rejeita adpic sempre (visto ao vivo: Return=-11/-15 mesmo após
+// reboot e comandos serializados) nunca vão confirmar um delete, então sem
+// essa saída a imagem ficaria travada na UI pra sempre. Só aceito quando o
+// status atual já é error/critical — nunca sobre um "pending" real, que ainda
+// pode confirmar a qualquer momento.
 app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
   const { sn } = req.params;
   const idx = parseInt(req.params.idx);
+  const force = req.query.force === "true";
   if (!idx) return res.status(400).json({ error: "Índice inválido" });
   const existing = await prisma.deviceMedia.findUnique({ where: { sn_idx: { sn, idx } } });
   if (!existing) return res.status(404).json({ error: "Imagem não encontrada" });
+
+  if (force) {
+    if (existing.status !== "error" && existing.status !== "critical") {
+      return res.status(409).json({ error: "Remoção forçada só é permitida em imagens com falha (error/critical)" });
+    }
+    await prisma.deviceMedia.delete({ where: { sn_idx: { sn, idx } } });
+    return res.json({ success: true, forced: true });
+  }
+
   const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${idx}` } });
   await prisma.deviceMedia.update({
     where: { sn_idx: { sn, idx } },
