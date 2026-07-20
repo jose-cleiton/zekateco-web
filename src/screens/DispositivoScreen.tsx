@@ -34,6 +34,9 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   const [diagnostics, setDiagnostics] = useState<Record<string, string> | null>(null);
   const [diagnosticsFetchedAt, setDiagnosticsFetchedAt] = useState<string | null>(null);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [idleSeconds, setIdleSeconds] = useState("30");
+  const [idleState, setIdleState] = useState<"idle" | "sending" | "done" | "error">("idle");
+  const [idleMessage, setIdleMessage] = useState<string>("");
 
   const loadDiagnostics = useCallback(async () => {
     if (!sn) return;
@@ -41,6 +44,9 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
       const r = await api.getDeviceDiagnostics(sn);
       setDiagnostics(r.data);
       setDiagnosticsFetchedAt(r.fetchedAt);
+      // IdleTime vem junto no GET OPTIONS de diagnóstico — reflete o valor
+      // real do REP no campo, em vez de sempre mostrar o default "30".
+      if (r.data?.IdleTime) setIdleSeconds(r.data.IdleTime);
     } catch { /* silencioso — card mostra "—" se não tiver dado ainda */ }
   }, [sn]);
 
@@ -58,10 +64,6 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
       alert(e.message || "Erro ao consultar diagnóstico");
     }
   };
-
-  const [idleSeconds, setIdleSeconds] = useState("30");
-  const [idleState, setIdleState] = useState<"idle" | "sending" | "done" | "error">("idle");
-  const [idleMessage, setIdleMessage] = useState<string>("");
 
   const onSetIdleTime = async () => {
     if (!sn) return;
@@ -277,8 +279,8 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
             } />
         )}
         {!readOnly && (
-          <SettingRow icon={Clock} label="Tempo de ociosidade"
-            hint={idleMessage || 'Segundos até o REP entrar em modo idle/slideshow (chave "IdleTime", não documentada oficialmente — confirmada por teste ao vivo)'}
+          <SettingRow icon={Clock} label="Intervalo do slideshow"
+            hint={idleMessage || 'Segundos que cada imagem do slideshow fica na tela antes de trocar pra próxima (chave "IdleTime", não documentada oficialmente — confirmada por teste ao vivo). Não controla o tempo até o REP ficar ocioso.'}
             control={
               <div className="flex items-center gap-2">
                 <input

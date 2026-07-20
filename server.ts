@@ -1669,7 +1669,7 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
 // Diagnóstico do REP — versão de firmware, capacidade, modelo. Somente leitura
 // (GET OPTIONS), sem risco de misconfigurar o aparelho. Chaves confirmadas no
 // protocolo oficial (9.5.2), testadas ao vivo.
-const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount";
+const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount,IdleTime";
 
 app.post("/api/devices/:sn/diagnostics/refresh", async (req, res) => {
   const { sn } = req.params;
@@ -1778,14 +1778,17 @@ app.post("/api/devices/:sn/sync-clock", async (req, res) => {
   }
 });
 
-// Tempo de ociosidade antes do REP entrar em modo idle/slideshow. Chave
-// "IdleTime" não está documentada no protocolo genérico (nem em nenhuma
-// fonte pública encontrada) — confirmada ao vivo por teste empírico
-// cauteloso, um comando isolado por vez, verificando que o REP continuava
-// respondendo entre cada tentativa (risco de brick documentado no
-// projeto). Return=0 sozinho não bastava como prova (firmware pode aceitar
-// chave desconhecida sem fazer nada) — só foi confirmada real após
-// observar visualmente o comportamento mudar na tela do REP.
+// Intervalo de troca de imagem no slideshow (quanto tempo cada wallpaper
+// fica na tela antes de trocar pra próxima) — NÃO é o tempo até o REP
+// entrar em modo idle (esse ainda não foi identificado). Chave "IdleTime"
+// não está documentada no protocolo genérico (nem em nenhuma fonte pública
+// encontrada) — confirmada ao vivo por teste empírico cauteloso, um
+// comando isolado por vez, verificando que o REP continuava respondendo
+// entre cada tentativa (risco de brick documentado no projeto). Return=0
+// sozinho não bastava como prova (firmware pode aceitar chave desconhecida
+// sem fazer nada) — só foi confirmada real após observar visualmente o
+// comportamento mudar na tela do REP (o intervalo entre trocas de imagem
+// mudou; o tempo até o slideshow começar a rodar não mudou).
 app.post("/api/devices/:sn/idle-time", express.json(), async (req, res) => {
   const { sn } = req.params;
   const seconds = parseInt(req.body?.seconds);
