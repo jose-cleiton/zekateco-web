@@ -59,7 +59,7 @@ export interface Tab {
 export type WSMessage =
   | { type: "hello"; boot_id: string }
   | { type: "new_log"; log: Log }
-  | { type: "device_update"; sn: string; online?: boolean; last_seen?: string }
+  | { type: "device_update"; sn: string; online?: boolean; last_seen?: string; clock_synced_at?: string }
   | { type: "users_updated" }
   | { type: "photo_op_update"; operation_id: string; status: SyncStatus["status"]; pin: string; error_detail?: string }
   | { type: "user_op_update"; operation_id: string; status: SyncStatus["status"]; pin: string; error_detail?: string }

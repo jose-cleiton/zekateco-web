@@ -1190,8 +1190,8 @@ app.post("/iclock/devicecmd", async (req, res) => {
       await enqueueNextHistoricChunk(cmd.sn!);
     }
     if (ret >= 0 && cmd?.command?.startsWith("SET OPTIONS DateTime=")) {
-      await prisma.device.update({ where: { sn: cmd.sn! }, data: { clock_synced_at: new Date() } });
-      broadcast({ type: "device_update", sn: cmd.sn! });
+      const updated = await prisma.device.update({ where: { sn: cmd.sn! }, data: { clock_synced_at: new Date() } });
+      broadcast({ type: "device_update", sn: cmd.sn!, clock_synced_at: updated.clock_synced_at?.toISOString() });
     }
 
     const photoOp = await prisma.photoOp.findFirst({ where: { command_id: cmdId } });

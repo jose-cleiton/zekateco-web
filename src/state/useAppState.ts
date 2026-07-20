@@ -37,7 +37,14 @@ export function useAppState(sn?: string) {
     if (msg.type === "new_log") {
       setLogs(prev => [msg.log, ...prev].slice(0, 100));
       setRealtimeLogs(prev => [msg.log, ...prev].slice(0, 200));
-    } else if (msg.type === "device_update" || msg.type === "users_updated") {
+    } else if (msg.type === "device_update") {
+      if (msg.clock_synced_at !== undefined) {
+        // Update device directly for clock sync to stop the spinner immediately
+        setDevices(prev => prev.map(d => d.sn === msg.sn ? { ...d, clock_synced_at: msg.clock_synced_at } : d));
+      } else {
+        refresh();
+      }
+    } else if (msg.type === "users_updated") {
       refresh();
     } else if (msg.type === "photo_op_update") {
       setUsers(prev => prev.map(u =>
