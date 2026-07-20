@@ -39,14 +39,22 @@ model Device {
 // individualmente e auto-atribuir próximo índice livre. O thumbnail é uma versão
 // pequena pra preview no dashboard sem refetch da imagem inteira.
 model DeviceMedia {
-  id         Int      @id @default(autoincrement())
-  sn         String   @db.VarChar(64)
+  id         Int       @id @default(autoincrement())
+  sn         String    @db.VarChar(64)
   idx        Int
   size       Int
-  ext        String   @db.VarChar(8)
-  thumbnail  Bytes?   @db.MediumBlob
-  created_at DateTime @default(now())
-  device     Device   @relation(fields: [sn], references: [sn], onDelete: Cascade)
+  ext        String    @db.VarChar(8)
+  thumbnail  Bytes?    @db.MediumBlob
+  created_at DateTime  @default(now())
+  // Rastreamento do push real do wallpaper (DATA UPDATE adpic), no mesmo
+  // padrão do PhotoOp: sem isso, um Return=-11 no ack do devicecmd não
+  // impedia o registro de ficar listado como se tivesse sido aplicado —
+  // bug confirmado ao vivo contra o REP real (DEV-47).
+  status       OpStatus @default(pending)
+  op_type      OpType   @default(upsert)
+  command_id   Int?
+  error_detail String?  @db.Text
+  device       Device   @relation(fields: [sn], references: [sn], onDelete: Cascade)
 
   @@unique([sn, idx])
   @@index([sn])

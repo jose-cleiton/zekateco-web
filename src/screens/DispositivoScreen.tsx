@@ -4,6 +4,7 @@ import type { ChangeEvent, ReactNode } from "react";
 import type { Device } from "../types";
 import { api } from "../api";
 import { RepLockCard } from "../components/common/RepLockCard";
+import { useWebSocket } from "../ws";
 
 interface Props {
   device: Device | null;
@@ -73,7 +74,11 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
 
   const isSyncing = syncState === "sending" || syncState === "waiting";
 
-  type MediaItem = { idx: number; sizeKB: number; ext: string; created_at: string; thumbnail: string | null };
+  type MediaItem = {
+    idx: number; sizeKB: number; ext: string; created_at: string; thumbnail: string | null;
+    status: "pending" | "sent" | "success" | "error" | "critical";
+    error_detail: string | null;
+  };
   const mediaInput = useRef<HTMLInputElement>(null);
   const [mediaList, setMediaList] = useState<MediaItem[]>([]);
   const [mediaUploading, setMediaUploading] = useState(false);
@@ -86,6 +91,13 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   }, [sn]);
 
   useEffect(() => { loadMedia(); }, [loadMedia]);
+
+  // O ack do devicecmd (Return>=0/<0) chega de forma assíncrona; recarrega a
+  // lista quando o backend confirmar sucesso/erro de um upload/delete de adpic,
+  // em vez de assumir otimisticamente que o comando enfileirado deu certo.
+  useWebSocket((msg) => {
+    if (msg.type === "device_update" && msg.sn === sn) loadMedia();
+  }, sn);
 
   const onPickMedia = () => mediaInput.current?.click();
 
@@ -221,15 +233,30 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
         ) : (
           <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
             {mediaList.map((m) => (
-              <div key={m.idx} className="relative group rounded border border-ink-200 dark:border-[#222A36] overflow-hidden">
+              <div key={m.idx} className={`relative group rounded border overflow-hidden ${
+                m.status === "error" || m.status === "critical" ? "border-red-300" : "border-ink-200 dark:border-[#222A36]"
+              }`}>
                 {m.thumbnail
-                  ? <img src={m.thumbnail} alt={`Slot ${m.idx}`} className="w-full h-32 object-cover" />
+                  ? <img src={m.thumbnail} alt={`Slot ${m.idx}`} className={`w-full h-32 object-cover ${m.status === "pending" ? "opacity-50" : ""}`} />
                   : <div className="w-full h-32 bg-ink-100 dark:bg-[#1A2030] flex items-center justify-center text-ink-400"><ImageIcon size={20} /></div>}
                 <div className="absolute top-1 left-1 bg-black/60 text-white text-[10px] font-semibold px-1.5 py-0.5 rounded">#{m.idx}</div>
                 <div className="absolute bottom-1 left-1 bg-black/60 text-white text-[10px] px-1.5 py-0.5 rounded">{m.sizeKB}KB</div>
+                {m.status === "pending" && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/30" title="Aguardando confirmação do REP">
+                    <Loader2 size={20} className="text-white animate-spin" />
+                  </div>
+                )}
+                {(m.status === "error" || m.status === "critical") && (
+                  <div
+                    className="absolute inset-x-0 top-0 bg-red-600 text-white text-[10px] font-semibold px-1.5 py-0.5 text-center"
+                    title={m.error_detail ? `Falhou: ${m.error_detail}` : "Falhou no REP"}
+                  >
+                    Falhou no REP
+                  </div>
+                )}
                 <button
                   onClick={() => onDeleteMedia(m.idx)}
-                  disabled={!isOnline}
+                  disabled={!isOnline || m.status === "pending"}
                   title="Remover esta imagem"
                   className="absolute top-1 right-1 bg-red-500 hover:bg-red-600 text-white rounded p-1 opacity-0 group-hover:opacity-100 transition disabled:opacity-50"
                 >

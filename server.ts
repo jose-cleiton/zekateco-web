@@ -1226,6 +1226,31 @@ app.post("/iclock/devicecmd", async (req, res) => {
         await userOpSetFailure(userOp, `Return=${ret}`);
       }
     }
+
+    // Wallpaper (adpic) — mesma lógica de sucesso/erro do photoOp/userOp acima.
+    // Sem isso, DeviceMedia ficava marcado como aplicado mesmo quando o REP
+    // rejeitava o comando (Return=-11 visto ao vivo) — bug DEV-47.
+    const media = await prisma.deviceMedia.findFirst({ where: { command_id: cmdId } });
+    if (media) {
+      const isDeleteNotFound = ret === -2 && media.op_type === "delete";
+      if (media.op_type === "delete") {
+        if (ret >= 0 || isDeleteNotFound) {
+          // Só remove o registro quando o REP confirma (ou já não tinha nada
+          // nesse slot) — antes disso, sumia da UI otimisticamente mesmo se
+          // o REP rejeitasse o DELETE e mantivesse a imagem.
+          await prisma.deviceMedia.delete({ where: { id: media.id } });
+        } else {
+          await prisma.deviceMedia.update({ where: { id: media.id }, data: { status: "error", error_detail: `Return=${ret}` } });
+        }
+      } else {
+        if (ret >= 0) {
+          await prisma.deviceMedia.update({ where: { id: media.id }, data: { status: "success", error_detail: null } });
+        } else {
+          await prisma.deviceMedia.update({ where: { id: media.id }, data: { status: "error", error_detail: `Return=${ret}` } });
+        }
+      }
+      broadcast({ type: "device_update", sn: media.sn });
+    }
   }
 
   res.type("text/plain").send("OK");
@@ -1386,7 +1411,7 @@ app.get("/api/devices/:sn/media", async (req, res) => {
   const items = await prisma.deviceMedia.findMany({
     where: { sn },
     orderBy: { idx: "asc" },
-    select: { idx: true, size: true, ext: true, thumbnail: true, created_at: true },
+    select: { idx: true, size: true, ext: true, thumbnail: true, created_at: true, status: true, error_detail: true },
   });
   res.json(items.map((m) => ({
     idx: m.idx,
@@ -1396,6 +1421,8 @@ app.get("/api/devices/:sn/media", async (req, res) => {
     thumbnail: m.thumbnail
       ? `data:image/jpeg;base64,${m.thumbnail.toString("base64")}`
       : null,
+    status: m.status,
+    error_detail: m.error_detail,
   })));
 });
 
@@ -1432,10 +1459,12 @@ app.post("/api/devices/:sn/media", mediaUpload.single("image"), async (req, res)
       .toBuffer();
 
     const c = await enqueueAdpic(sn, idx, out, ext);
+    // pending até o ack do devicecmd (Return>=0 → sent; Return<0 → error) —
+    // antes disso o registro já aparecia como aplicado incondicionalmente.
     await prisma.deviceMedia.upsert({
       where: { sn_idx: { sn, idx } },
-      create: { sn, idx, size: out.length, ext, thumbnail: thumb },
-      update: { size: out.length, ext, thumbnail: thumb, created_at: new Date() },
+      create: { sn, idx, size: out.length, ext, thumbnail: thumb, status: "pending", command_id: c.id, error_detail: null },
+      update: { size: out.length, ext, thumbnail: thumb, created_at: new Date(), status: "pending", command_id: c.id, error_detail: null },
     });
     console.log(`[ZK] media queued: cmd=${c.id} sn=${sn} idx=${idx} ext=${ext} bytes=${out.length}`);
     res.json({ success: true, commandId: c.id, idx, sizeKB: Math.round(out.length / 1024), ext });
@@ -1445,13 +1474,20 @@ app.post("/api/devices/:sn/media", mediaUpload.single("image"), async (req, res)
   }
 });
 
-// Remove uma imagem específica do REP por índice.
+// Remove uma imagem específica do REP por índice. Fica "pending" (some da UI
+// como resultado pendente, não desaparece de vez) até o ack confirmar —
+// mesmo padrão do upload, pra não mostrar como removido se o REP rejeitar.
 app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
   const { sn } = req.params;
   const idx = parseInt(req.params.idx);
   if (!idx) return res.status(400).json({ error: "Índice inválido" });
-  await prisma.deviceMedia.deleteMany({ where: { sn, idx } });
+  const existing = await prisma.deviceMedia.findUnique({ where: { sn_idx: { sn, idx } } });
+  if (!existing) return res.status(404).json({ error: "Imagem não encontrada" });
   const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${idx}` } });
+  await prisma.deviceMedia.update({
+    where: { sn_idx: { sn, idx } },
+    data: { status: "pending", op_type: "delete", command_id: c.id, error_detail: null },
+  });
   res.json({ success: true, commandId: c.id });
 });
 
@@ -1476,19 +1512,27 @@ app.post("/api/devices/:sn/userpics/clear", async (req, res) => {
   res.json({ success: true, queued: cmds.length });
 });
 
-// Limpa todas as adpics do REP + apaga registros locais.
+// Limpa todas as adpics do REP. Cada registro existente vira "pending" e só
+// some de fato quando o ack específico daquele índice confirmar — o wildcard
+// (*) é só um atalho de melhor esforço (o firmware pode rejeitar, caso já
+// documentado), quem garante o estado real são os deletes por índice.
 app.post("/api/devices/:sn/media/clear", async (req, res) => {
   const { sn } = req.params;
   const device = await prisma.device.findUnique({ where: { sn } });
   if (!device) return res.status(404).json({ error: "REP não encontrado" });
-  await prisma.deviceMedia.deleteMany({ where: { sn } });
-  // Wildcard + 10 índices explícitos (nem todo firmware suporta o *).
+  const existing = await prisma.deviceMedia.findMany({ where: { sn }, select: { idx: true } });
   const cmds: number[] = [];
   const wildcard = await prisma.command.create({ data: { sn, command: "DATA DELETE adpic *" } });
   cmds.push(wildcard.id);
+  const trackedIdx = new Set(existing.map((m) => m.idx));
   for (let i = 1; i <= 10; i++) {
+    if (!trackedIdx.has(i)) continue; // não gasta comando/tracking em slot sem registro local
     const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${i}` } });
     cmds.push(c.id);
+    await prisma.deviceMedia.update({
+      where: { sn_idx: { sn, idx: i } },
+      data: { status: "pending", op_type: "delete", command_id: c.id, error_detail: null },
+    });
   }
   res.json({ success: true, queued: cmds.length });
 });
