@@ -34,14 +34,6 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   const [diagnostics, setDiagnostics] = useState<Record<string, string> | null>(null);
   const [diagnosticsFetchedAt, setDiagnosticsFetchedAt] = useState<string | null>(null);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
-  const [idleSeconds, setIdleSeconds] = useState("30");
-  const [idleState, setIdleState] = useState<"idle" | "sending" | "done" | "error">("idle");
-  const [idleMessage, setIdleMessage] = useState<string>("");
-  // Uma vez que o usuário mexeu no campo manualmente, para de sobrescrever
-  // com o valor vindo do diagnóstico — sem isso, o refresh automático (a
-  // cada device_update, disparado a cada poll do REP a cada ~5s) resetava
-  // o campo enquanto a pessoa ainda estava digitando um valor novo.
-  const idleSecondsTouched = useRef(false);
 
   type CommandLogItem = { id: number; command: string | null; status: number; return_code: number | null; created_at: string; op_id: number | null };
   const [commandLog, setCommandLog] = useState<CommandLogItem[]>([]);
@@ -60,10 +52,6 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
       const r = await api.getDeviceDiagnostics(sn);
       setDiagnostics(r.data);
       setDiagnosticsFetchedAt(r.fetchedAt);
-      // IdleTime vem junto no GET OPTIONS de diagnóstico — reflete o valor
-      // real do REP no campo, em vez de sempre mostrar o default "30". Só
-      // sobrescreve se o usuário ainda não mexeu no campo manualmente.
-      if (r.data?.IdleTime && !idleSecondsTouched.current) setIdleSeconds(r.data.IdleTime);
     } catch { /* silencioso — card mostra "—" se não tiver dado ainda */ }
   }, [sn]);
 
@@ -79,30 +67,6 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
     } catch (e: any) {
       setDiagnosticsLoading(false);
       alert(e.message || "Erro ao consultar diagnóstico");
-    }
-  };
-
-  const onSetIdleTime = async () => {
-    if (!sn) return;
-    const secs = parseInt(idleSeconds);
-    if (!Number.isFinite(secs) || secs < 3 || secs > 3600) {
-      setIdleState("error");
-      setIdleMessage("Use um valor entre 3 e 3600 segundos");
-      return;
-    }
-    setIdleState("sending");
-    setIdleMessage("Enviando...");
-    try {
-      await api.setIdleTime(sn, secs);
-      setIdleState("done");
-      setIdleMessage("Enviado — confirme na tela do REP");
-      // Depois de aplicar, volta a aceitar o valor real vindo do diagnóstico
-      // (que vai refletir o que o REP realmente confirmou).
-      idleSecondsTouched.current = false;
-      setTimeout(() => { setIdleState("idle"); setIdleMessage(""); }, 4000);
-    } catch (e: any) {
-      setIdleState("error");
-      setIdleMessage(e.message || "Erro ao enviar");
     }
   };
 
@@ -274,6 +238,9 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
             <SettingRow icon={Info} label="Modelo" control={<span className="text-[13px]">{diagnostics.MachineType || "—"}</span>} />
             <SettingRow icon={Info} label="Capacidade máx. de usuários" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxUserCount"] || "—"}</span>} />
             <SettingRow icon={Info} label="Capacidade máx. de registros" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxAttLogCount"] || "—"}</span>} />
+            <SettingRow icon={Clock} label="Intervalo do slideshow"
+              hint='Segundos que cada imagem fica na tela antes de trocar (chave "IdleTime", não documentada oficialmente). Somente leitura — a configuração de "tempo até o REP ficar ocioso" é local ao aparelho, sem equivalente remoto (confirmado por teste ao vivo).'
+              control={<span className="font-mono tabular text-[13px]">{diagnostics.IdleTime ? `${diagnostics.IdleTime}s` : "—"}</span>} />
             {diagnosticsFetchedAt && (
               <div className="text-[11px] text-ink-400 mt-2">Consultado em {new Date(diagnosticsFetchedAt).toLocaleString("pt-BR")}</div>
             )}
@@ -297,28 +264,6 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
                 {rebootState === "done" && <Check size={12} className="text-emerald-600" />}
                 {rebootState === "sending" ? "Enviando..." : rebootState === "done" ? "Enfileirado" : "Reiniciar"}
               </button>
-            } />
-        )}
-        {!readOnly && (
-          <SettingRow icon={Clock} label="Intervalo do slideshow"
-            hint={idleMessage || 'Segundos que cada imagem do slideshow fica na tela antes de trocar pra próxima (chave "IdleTime", não documentada oficialmente — confirmada por teste ao vivo). Não controla o tempo até o REP ficar ocioso.'}
-            control={
-              <div className="flex items-center gap-2">
-                <input
-                  type="number" min={3} max={3600} value={idleSeconds}
-                  onChange={e => { idleSecondsTouched.current = true; setIdleSeconds(e.target.value); }}
-                  className="field w-20 tabular text-[13px]"
-                />
-                <button
-                  className="btn-outline inline-flex items-center gap-1.5"
-                  onClick={onSetIdleTime}
-                  disabled={!isOnline || idleState === "sending"}
-                >
-                  {idleState === "sending" && <Loader2 size={12} className="animate-spin" />}
-                  {idleState === "done" && <Check size={12} className="text-emerald-600" />}
-                  {idleState === "sending" ? "Enviando..." : "Aplicar"}
-                </button>
-              </div>
             } />
         )}
       </div>
