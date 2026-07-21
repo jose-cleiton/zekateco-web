@@ -239,9 +239,6 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
             <SettingRow icon={Cpu} label="Plataforma" control={<span className="font-mono tabular text-[13px]">{diagnostics["~Platform"] || "—"}</span>} />
             <SettingRow icon={Info} label="Capacidade máx. de usuários" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxUserCount"] || "—"}</span>} />
             <SettingRow icon={Info} label="Capacidade máx. de registros" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxAttLogCount"] || "—"}</span>} />
-            <SettingRow icon={Clock} label="Intervalo do slideshow"
-              hint='Segundos que cada imagem fica na tela antes de trocar (chave "IdleTime", não documentada oficialmente). Somente leitura — a configuração de "tempo até o REP ficar ocioso" é local ao aparelho, sem equivalente remoto (confirmado por teste ao vivo).'
-              control={<span className="font-mono tabular text-[13px]">{diagnostics.IdleTime ? `${diagnostics.IdleTime}s` : "—"}</span>} />
             {diagnosticsFetchedAt && (
               <div className="text-[11px] text-ink-400 mt-2">Consultado em {new Date(diagnosticsFetchedAt).toLocaleString("pt-BR")}</div>
             )}

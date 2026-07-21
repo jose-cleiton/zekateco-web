@@ -1705,7 +1705,13 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
 // genérico mas confirmados NÃO suportados por este firmware — testado ao
 // vivo, o REP simplesmente omite esses campos da resposta (não dá erro,
 // só não retorna). Não incluir de novo sem reconfirmar noutro firmware.
-const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,~Platform,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount,IdleTime";
+// IdleTime não entra aqui: é um valor mutável que só reflete o que foi
+// setado remotamente por nós (SET OPTIONS IdleTime=...), e diverge
+// silenciosamente se o usuário mudar algo relacionado no menu local do REP
+// — mostrar isso como "diagnóstico" dava falsa confiança sobre o estado
+// real do aparelho. Diagnóstico fica só com fatos de hardware estáveis
+// (firmware, plataforma, modelo, capacidade), que não têm esse problema.
+const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,~Platform,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount";
 
 app.post("/api/devices/:sn/diagnostics/refresh", async (req, res) => {
   const { sn } = req.params;
