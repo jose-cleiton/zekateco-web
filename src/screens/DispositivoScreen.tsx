@@ -236,6 +236,7 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
             <SettingRow icon={Info} label="Firmware" control={<span className="font-mono tabular text-[13px]">{diagnostics.FirmVer || "—"}</span>} />
             <SettingRow icon={Cpu} label="Nome do dispositivo" control={<span className="text-[13px]">{diagnostics["~DeviceName"] || "—"}</span>} />
             <SettingRow icon={Info} label="Modelo" control={<span className="text-[13px]">{diagnostics.MachineType || "—"}</span>} />
+            <SettingRow icon={Cpu} label="Plataforma" control={<span className="font-mono tabular text-[13px]">{diagnostics["~Platform"] || "—"}</span>} />
             <SettingRow icon={Info} label="Capacidade máx. de usuários" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxUserCount"] || "—"}</span>} />
             <SettingRow icon={Info} label="Capacidade máx. de registros" control={<span className="font-mono tabular text-[13px]">{diagnostics["~MaxAttLogCount"] || "—"}</span>} />
             <SettingRow icon={Clock} label="Intervalo do slideshow"

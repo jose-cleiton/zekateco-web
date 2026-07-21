@@ -1701,7 +1701,11 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
 // Diagnóstico do REP — versão de firmware, capacidade, modelo. Somente leitura
 // (GET OPTIONS), sem risco de misconfigurar o aparelho. Chaves confirmadas no
 // protocolo oficial (9.5.2), testadas ao vivo.
-const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount,IdleTime";
+// MAC, UserCount, FaceCount, ~MaxFaceCount são documentados no protocolo
+// genérico mas confirmados NÃO suportados por este firmware — testado ao
+// vivo, o REP simplesmente omite esses campos da resposta (não dá erro,
+// só não retorna). Não incluir de novo sem reconfirmar noutro firmware.
+const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,~Platform,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount,IdleTime";
 
 app.post("/api/devices/:sn/diagnostics/refresh", async (req, res) => {
   const { sn } = req.params;
