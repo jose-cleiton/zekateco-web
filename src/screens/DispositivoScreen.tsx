@@ -37,6 +37,11 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   const [idleSeconds, setIdleSeconds] = useState("30");
   const [idleState, setIdleState] = useState<"idle" | "sending" | "done" | "error">("idle");
   const [idleMessage, setIdleMessage] = useState<string>("");
+  // Uma vez que o usuário mexeu no campo manualmente, para de sobrescrever
+  // com o valor vindo do diagnóstico — sem isso, o refresh automático (a
+  // cada device_update, disparado a cada poll do REP a cada ~5s) resetava
+  // o campo enquanto a pessoa ainda estava digitando um valor novo.
+  const idleSecondsTouched = useRef(false);
 
   type CommandLogItem = { id: number; command: string | null; status: number; return_code: number | null; created_at: string; op_id: number | null };
   const [commandLog, setCommandLog] = useState<CommandLogItem[]>([]);
@@ -56,8 +61,9 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
       setDiagnostics(r.data);
       setDiagnosticsFetchedAt(r.fetchedAt);
       // IdleTime vem junto no GET OPTIONS de diagnóstico — reflete o valor
-      // real do REP no campo, em vez de sempre mostrar o default "30".
-      if (r.data?.IdleTime) setIdleSeconds(r.data.IdleTime);
+      // real do REP no campo, em vez de sempre mostrar o default "30". Só
+      // sobrescreve se o usuário ainda não mexeu no campo manualmente.
+      if (r.data?.IdleTime && !idleSecondsTouched.current) setIdleSeconds(r.data.IdleTime);
     } catch { /* silencioso — card mostra "—" se não tiver dado ainda */ }
   }, [sn]);
 
@@ -90,6 +96,9 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
       await api.setIdleTime(sn, secs);
       setIdleState("done");
       setIdleMessage("Enviado — confirme na tela do REP");
+      // Depois de aplicar, volta a aceitar o valor real vindo do diagnóstico
+      // (que vai refletir o que o REP realmente confirmou).
+      idleSecondsTouched.current = false;
       setTimeout(() => { setIdleState("idle"); setIdleMessage(""); }, 4000);
     } catch (e: any) {
       setIdleState("error");
@@ -297,7 +306,7 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
               <div className="flex items-center gap-2">
                 <input
                   type="number" min={3} max={3600} value={idleSeconds}
-                  onChange={e => setIdleSeconds(e.target.value)}
+                  onChange={e => { idleSecondsTouched.current = true; setIdleSeconds(e.target.value); }}
                   className="field w-20 tabular text-[13px]"
                 />
                 <button
