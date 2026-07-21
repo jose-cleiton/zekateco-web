@@ -121,4 +121,9 @@ export const api = {
   async getDeviceDiagnostics(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/diagnostics`)) as Promise<{ data: Record<string, string> | null; fetchedAt: string | null }>;
   },
+  async getDeviceCommands(sn: string, limit = 50) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/commands?limit=${limit}`)) as Promise<Array<{
+      id: number; command: string | null; status: number; return_code: number | null; created_at: string; op_id: number | null;
+    }>>;
+  },
 };

@@ -1337,6 +1337,32 @@ app.get("/api/devices", async (_req, res) => {
   res.json(result);
 });
 
+// Log de comandos por REP — visibilidade do que foi enfileirado, entregue e
+// confirmado, sem precisar consultar o banco na mão. status: 0=pendente
+// (ainda não entregue via getrequest), 1=entregue (aguardando ack do REP),
+// 2=confirmado (ver return_code pro resultado real, positivo/zero=sucesso),
+// 3=erro (return_code negativo). Trunca o corpo do comando (fotos/wallpaper
+// em base64 podem ter dezenas de KB) — só o suficiente pra reconhecer o
+// comando na lista.
+app.get("/api/devices/:sn/commands", async (req, res) => {
+  const { sn } = req.params;
+  const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+  const commands = await prisma.command.findMany({
+    where: { sn },
+    orderBy: { id: "desc" },
+    take: limit,
+    select: { id: true, command: true, status: true, return_code: true, created_at: true, op_id: true },
+  });
+  res.json(commands.map((c) => ({
+    id: c.id,
+    command: (c.command ?? "").length > 120 ? c.command!.slice(0, 120) + "…" : c.command,
+    status: c.status,
+    return_code: c.return_code,
+    created_at: c.created_at.toISOString(),
+    op_id: c.op_id,
+  })));
+});
+
 // Resolve IP público → REP(s). Retorna LISTA: REPs atrás do mesmo NAT
 // compartilham IP público; o front trata a colisão com um seletor.
 app.get("/api/devices/by-ip/:ip", async (req, res) => {

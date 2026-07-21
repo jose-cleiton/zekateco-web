@@ -38,6 +38,17 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   const [idleState, setIdleState] = useState<"idle" | "sending" | "done" | "error">("idle");
   const [idleMessage, setIdleMessage] = useState<string>("");
 
+  type CommandLogItem = { id: number; command: string | null; status: number; return_code: number | null; created_at: string; op_id: number | null };
+  const [commandLog, setCommandLog] = useState<CommandLogItem[]>([]);
+
+  const loadCommandLog = useCallback(async () => {
+    if (!sn) return;
+    try { setCommandLog(await api.getDeviceCommands(sn, 50)); }
+    catch { /* silencioso — não é crítico, é só um log auxiliar */ }
+  }, [sn]);
+
+  useEffect(() => { loadCommandLog(); }, [loadCommandLog]);
+
   const loadDiagnostics = useCallback(async () => {
     if (!sn) return;
     try {
@@ -151,7 +162,8 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
   // lista quando o backend confirmar sucesso/erro de um upload/delete de adpic,
   // em vez de assumir otimisticamente que o comando enfileirado deu certo.
   useWebSocket((msg) => {
-    if (msg.type === "device_update" && msg.sn === sn) { loadMedia(); loadDiagnostics(); }
+    if (msg.type === "device_update" && msg.sn === sn) { loadMedia(); loadDiagnostics(); loadCommandLog(); }
+    if (msg.type === "command_result") loadCommandLog();
   }, sn);
 
   const onPickMedia = () => mediaInput.current?.click();
@@ -401,6 +413,56 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
             ))}
         </div>
         <input type="file" ref={mediaInput} accept="image/*" className="hidden" onChange={onMediaChange} />
+      </div>
+      )}
+
+      {!readOnly && (
+      <div className="up-card p-5 xl:col-span-2">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white">Log de comandos</h3>
+          <button className="btn-soft inline-flex items-center gap-1.5 text-[12.5px]" onClick={loadCommandLog}>
+            <RefreshCw size={12} /> Atualizar
+          </button>
+        </div>
+        <div className="text-[12px] text-ink-500 mb-3">
+          Últimos comandos enviados a este REP — útil pra confirmar se algo realmente chegou, ou se ficou preso na fila.
+        </div>
+        {commandLog.length === 0 ? (
+          <div className="py-6 text-center text-[13px] text-ink-400 border border-dashed border-ink-200 dark:border-[#2A3140] rounded">
+            Nenhum comando registrado ainda.
+          </div>
+        ) : (
+          <div className="overflow-x-auto max-h-96 overflow-y-auto">
+            <table className="w-full text-[12.5px]">
+              <thead className="sticky top-0 bg-white dark:bg-[#161B26]">
+                <tr className="text-left text-ink-500 border-b border-ink-200 dark:border-[#222A36]">
+                  <th className="py-1.5 pr-2 font-medium">Quando</th>
+                  <th className="py-1.5 pr-2 font-medium">Comando</th>
+                  <th className="py-1.5 pr-2 font-medium">Status</th>
+                  <th className="py-1.5 pr-2 font-medium">Return</th>
+                </tr>
+              </thead>
+              <tbody>
+                {commandLog.map((c) => {
+                  const statusInfo = {
+                    0: { label: "Pendente", cls: "text-ink-400" },
+                    1: { label: "Entregue", cls: "text-amber-600" },
+                    2: { label: (c.return_code ?? 0) >= 0 ? "Confirmado" : "Erro", cls: (c.return_code ?? 0) >= 0 ? "text-emerald-600" : "text-red-600" },
+                    3: { label: "Erro", cls: "text-red-600" },
+                  }[c.status] ?? { label: String(c.status), cls: "text-ink-500" };
+                  return (
+                    <tr key={c.id} className="border-b border-ink-100 dark:border-[#1A2030] last:border-0">
+                      <td className="py-1.5 pr-2 tabular whitespace-nowrap text-ink-500">{new Date(c.created_at).toLocaleTimeString("pt-BR")}</td>
+                      <td className="py-1.5 pr-2 font-mono text-[11px] max-w-md truncate" title={c.command ?? ""}>{c.command}</td>
+                      <td className={`py-1.5 pr-2 font-medium ${statusInfo.cls}`}>{statusInfo.label}</td>
+                      <td className="py-1.5 pr-2 tabular">{c.return_code ?? "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
       )}
     </div>
