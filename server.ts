@@ -1288,8 +1288,14 @@ app.post("/iclock/devicecmd", async (req, res) => {
 // --- API for Frontend ---
 
 app.get("/api/config", (_req, res) => {
-  const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-  res.json({ port, read_only: READ_ONLY });
+  // ADMS_PUBLIC_PORT é a porta que o REP de fato precisa apontar (gateway
+  // externo do nginx/frontend, ex: 8080 em produção, 8090 neste setup local
+  // via docker-compose.override.yml) — NÃO é a porta interna do Express
+  // (process.env.PORT, sempre 3000 dentro do container), que era mostrada
+  // por engano no dashboard como "Porta ADMS" e confundia o valor real a
+  // configurar no aparelho.
+  const admsPort = process.env.ADMS_PUBLIC_PORT ? parseInt(process.env.ADMS_PUBLIC_PORT) : 8080;
+  res.json({ port: admsPort, read_only: READ_ONLY });
 });
 
 // Ingestão em massa de "REP visto" — alimenta o dashboard a partir do
