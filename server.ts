@@ -2144,13 +2144,43 @@ async function enqueueNextHistoricChunk(sn: string) {
   console.log(`[ZK] sync-historic: enfileirado chunk ${next.start} → ${next.end} pra SN=${sn} (${queue.length} restantes)`);
 }
 
+// Gera os chunks mensais entre `from` e `to`. O primeiro chunk começa
+// EXATAMENTE em `from` (nunca arredondado pro dia 1 do mês — bug DEV-46:
+// cursor.setUTCDate(1) ignorava o dia pedido e sempre expandia o intervalo
+// pra trás até o início do mês) e o último termina exatamente em `to`. Só
+// os chunks intermediários (quando o intervalo cruza virada de mês) caem
+// em fronteiras de mês, porque é aí que a quebra precisa acontecer.
+function buildHistoricChunks(from: Date, to: Date): { start: string; end: string }[] {
+  const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
+  const cursor = new Date(from.getTime());
+  const chunks: { start: string; end: string }[] = [];
+  while (cursor < to) {
+    const start = new Date(cursor);
+    // Início do PRÓXIMO mês relativo ao cursor atual — não "cursor + 1 mês",
+    // que preservaria o dia (ex: 16/jul + 1 mês = 16/ago, pulando a
+    // fronteira real do mês em vez de parar nela).
+    const nextMonthStart = Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1);
+    cursor.setTime(nextMonthStart);
+    const end = new Date(Math.min(cursor.getTime(), to.getTime()) - 1000);
+    chunks.push({ start: fmt(start), end: fmt(end) });
+  }
+  return chunks;
+}
+
 // Sincroniza histórico de logs do REP em janelas MENSAIS SERIALIZADAS.
 // filter=* sem data trava o firmware, e enfileirar múltiplos chunks de uma
 // vez também trava. Enfileiramos só o primeiro; conforme o REP ack cada um,
 // o handler devicecmd chama enqueueNextHistoricChunk automaticamente.
 app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   const from = req.body?.from ? new Date(req.body.from) : null;
-  const to = req.body?.to ? new Date(req.body.to) : new Date();
+  // "to" enviado como data pura (YYYY-MM-DD, sem hora) significa "até o FIM
+  // desse dia", não meia-noite — senão from=to=mesmo dia vira um intervalo
+  // de zero segundos e não gera nenhum chunk, apesar do usuário claramente
+  // querer os logs daquele dia inteiro.
+  let to = req.body?.to ? new Date(req.body.to) : new Date();
+  if (typeof req.body?.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.body.to)) {
+    to = new Date(to.getTime() + 24 * 60 * 60 * 1000 - 1);
+  }
   const targetSn = (req.body && typeof req.body === "object" && (req.body as any).sn)
     ? String((req.body as any).sn)
     : null;
@@ -2183,16 +2213,7 @@ app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   // Fallback: fila local com chunks mensais (só funciona pra REP que aponta
   // direto pra 2.25.208.124). Formato antigo, com startTime/EndTime — o
   // SenseFace 7A às vezes trava, ver histórico do repo.
-  const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
-  const cursor = new Date(from.getTime());
-  cursor.setUTCDate(1);
-  const chunks: { start: string; end: string }[] = [];
-  while (cursor < to) {
-    const start = new Date(cursor);
-    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
-    const end = new Date(Math.min(cursor.getTime(), to.getTime()) - 1000);
-    chunks.push({ start: fmt(start), end: fmt(end) });
-  }
+  const chunks = buildHistoricChunks(from, to);
 
   let totalPlanned = 0;
   for (const dev of devices) {
