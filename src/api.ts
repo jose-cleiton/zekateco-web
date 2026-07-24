@@ -24,6 +24,13 @@ export const api = {
   async getDeviceByIp(ip: string): Promise<{ sn: string; ip: string; alias: string; locked: boolean; last_seen: string | null; online: boolean }[]> {
     return jsonOrThrow(await fetch(`/api/devices/by-ip/${encodeURIComponent(ip)}`));
   },
+  async updateDeviceAlias(sn: string, alias: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/alias`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alias }),
+    }));
+  },
 
   async createUser(data: { pin: string; name: string; privilege?: number; password?: string; card?: string }) {
     return jsonOrThrow(await fetch("/api/users", {
@@ -80,6 +87,9 @@ export const api = {
   async rebootDevice(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/reboot`, { method: "POST" }));
   },
+  async syncClock(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/sync-clock`, { method: "POST" }));
+  },
   async lockDevice(sn: string, locked: boolean) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/lock`, {
       method: "POST",
@@ -96,13 +106,24 @@ export const api = {
     if (index) fd.append("index", String(index));
     return jsonOrThrow(await fetch(`/api/devices/${sn}/media`, { method: "POST", body: fd }));
   },
-  async deleteDeviceMedia(sn: string, idx: number) {
-    return jsonOrThrow(await fetch(`/api/devices/${sn}/media/${idx}`, { method: "DELETE" }));
+  async deleteDeviceMedia(sn: string, idx: number, force = false) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/media/${idx}${force ? "?force=true" : ""}`, { method: "DELETE" }));
   },
   async clearDeviceMedia(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/media/clear`, { method: "POST" }));
   },
   async clearDeviceUserpics(sn: string) {
     return jsonOrThrow(await fetch(`/api/devices/${sn}/userpics/clear`, { method: "POST" }));
+  },
+  async refreshDeviceDiagnostics(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/diagnostics/refresh`, { method: "POST" }));
+  },
+  async getDeviceDiagnostics(sn: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/diagnostics`)) as Promise<{ data: Record<string, string> | null; fetchedAt: string | null }>;
+  },
+  async getDeviceCommands(sn: string, limit = 50) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/commands?limit=${limit}`)) as Promise<Array<{
+      id: number; command: string | null; status: number; return_code: number | null; created_at: string; op_id: number | null;
+    }>>;
   },
 };

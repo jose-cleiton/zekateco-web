@@ -46,6 +46,13 @@ services:
       READ_ONLY: ${READ_ONLY:-1}
       # Deve ser o MESMO valor do ZEKATECO_MIRROR_SECRET no Soltech.
       MIRROR_SECRET: ${MIRROR_SECRET}
+      # Porta pública do gateway ADMS que o REP precisa configurar (não a
+      # porta interna do Express, sempre 3000) — mesma variável usada no
+      # port mapping do frontend logo abaixo, fonte única de verdade. Sem
+      # isso, os dois valores podiam divergir silenciosamente (já aconteceu:
+      # dashboard mostrava 3000/8080 enquanto o REP real precisava de 8090
+      # nesse setup local).
+      ADMS_PUBLIC_PORT: ${ADMS_PUBLIC_PORT:-8080}
       # --- Webdriver mode via API do Soltech ---
       # Quando configurado, endpoints de comando (/api/sync-users,
       # /api/devices/:sn/reboot, etc.) chamam POST /rep/zkteco/send-command/:sn
@@ -74,7 +81,10 @@ services:
     restart: unless-stopped
     ports:
       - "81:80"     # dashboard local (80 do host pode estar ocupado)
-      - "8080:8080" # gateway ADMS — REPs chegam aqui via domínio api.ultraponto.ultrasistech.com.br
+      # gateway ADMS — REPs chegam aqui via domínio api.ultraponto.ultrasistech.com.br.
+      # ${ADMS_PUBLIC_PORT} é a MESMA variável passada pro backend acima —
+      # muda só num lugar (.env) e os dois lados continuam batendo.
+      - "${ADMS_PUBLIC_PORT:-8080}:8080"
     depends_on:
       - backend
     networks:

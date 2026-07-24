@@ -168,10 +168,10 @@ app.use((req, res, next) => {
 
 // --- Modo read-only ----------------------------------------------------------
 // READ_ONLY=1 → nenhum comando é enfileirado pro REP; escritas em /api → 501
-// (exceto mapeamentos locais de soltech-id, que não tocam o REP).
+// (exceto mapeamentos locais de soltech-id e o alias do device, que não tocam o REP).
 // READ_ONLY=0 mantém o comportamento antigo (REP direto na 8090, dev local).
 const READ_ONLY = process.env.READ_ONLY === "1";
-const READ_ONLY_ALLOW = [/^\/api\/soltech-ids$/, /^\/api\/users\/[^/]+\/soltech-id$/];
+const READ_ONLY_ALLOW = [/^\/api\/soltech-ids$/, /^\/api\/users\/[^/]+\/soltech-id$/, /^\/api\/devices\/[^/]+\/alias$/];
 app.use("/api", (req, res, next) => {
   if (!READ_ONLY || req.method === "GET") return next();
   const pathOnly = req.originalUrl.split("?")[0];
@@ -405,6 +405,25 @@ app.get("/iclock/ping", async (req, res) => {
   res.type("text/plain").send("OK");
 });
 
+// Alguns REPs, após receber "SET OPTIONS DateTime=..." (9.5.1), não aplicam
+// o valor enviado diretamente — em vez disso, disparam esta requisição
+// pedindo a hora "oficial" do servidor, e só ajustam o relógio com base
+// nessa resposta. Sem este endpoint, o ack do SET OPTIONS vem com sucesso
+// (Return=0) mas o relógio do REP nunca muda de fato — bug já observado ao
+// vivo (comando aceito, hora do aparelho não mudou).
+app.get("/iclock/rtdata", async (req, res) => {
+  const { SN, type } = req.query;
+  console.log(`[ZK] rtdata from SN: ${SN}, type: ${type}`);
+  if (SN) await updateDeviceSeen(SN as string, (req.headers["x-forwarded-for"] as string) || req.ip || "", req);
+  if (type === "time") {
+    const now = new Date();
+    const seconds = encodeZktecoDateTimeUTC(now);
+    const serverTZ = getZonedOffset(now, APP_TIMEZONE);
+    return res.type("text/plain").send(`DateTime=${seconds},ServerTZ=${serverTZ}`);
+  }
+  res.type("text/plain").send("OK");
+});
+
 // 0. Handshake / Registry
 app.post("/iclock/registry", async (req, res) => {
   const { SN } = req.query;
@@ -449,7 +468,7 @@ app.get("/iclock/cdata", async (req, res) => {
 
     if (device) {
       return res.type("text/plain").send(
-        `registry=ok\nRegistryCode=REG_${SN}_xyz789\nServerVersion=3.1.2\nPushProtVer=3.1.2\nRequestDelay=30\nTransTimes=00:00;14:00\nTransInterval=1\nRealtime=1\nBioPhotoFun=1\nBioDataFun=1\nEncryption=None`
+        `registry=ok\nRegistryCode=REG_${SN}_xyz789\nServerVersion=3.1.2\nPushProtVer=3.1.2\nRequestDelay=5\nTransTimes=00:00;14:00\nTransInterval=1\nRealtime=1\nBioPhotoFun=1\nBioDataFun=1\nEncryption=None`
       );
     }
   }
@@ -466,7 +485,11 @@ async function insertLogIgnoreDup(
   verifyType: number,
 ): Promise<number | null> {
   try {
-    const t = time ? new Date(time) : null;
+    // Strings ISO (terminam em "Z") já vêm em UTC correto, do decode do
+    // time_second proprietário (Apêndice 5/6) — usar direto. Strings "YYYY-MM-DD
+    // HH:mm:ss" (rtlog/ATTLOG) são hora LOCAL do REP e precisam da conversão
+    // explícita, senão o fuso do container (UTC) interpreta errado.
+    const t = time ? (time.endsWith("Z") ? new Date(time) : parseDeviceLocalTime(time)) : null;
     const created = await prisma.log.create({
       data: { sn, pin, time: t, status, verify_type: verifyType },
     });
@@ -599,6 +622,11 @@ app.post("/iclock/cdata", async (req, res) => {
   res.type("text/plain").send("OK");
 });
 
+// Cache em memória da última resposta de "GET OPTIONS" por SN — diagnóstico
+// (firmware, capacidade) não precisa persistir no banco, só refletir no
+// dashboard enquanto o processo está de pé; um novo GET OPTIONS reemite.
+const deviceOptionsCache = new Map<string, { data: Record<string, string>; fetchedAt: Date }>();
+
 // 2b. Query Data — device responds to DATA QUERY commands (photos, users, transactions)
 app.post("/iclock/querydata", async (req, res) => {
   const { SN, tablename } = req.query;
@@ -670,6 +698,17 @@ app.post("/iclock/querydata", async (req, res) => {
       }
     }
     if (parsed > 0) console.log(`[ZK] querydata-transaction: saved ${parsed} logs from SN=${SN}`);
+  } else if (tablename === "options") {
+    // Resposta de "GET OPTIONS ~SerialNumber,FirmVer,..." (9.5.2 do protocolo)
+    // — corpo vem como "Key=Value,Key2=Value2" (vírgula, não tab/espaço).
+    const data: Record<string, string> = {};
+    for (const part of body.split(",")) {
+      const eq = part.indexOf("=");
+      if (eq > -1) data[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+    }
+    deviceOptionsCache.set(SN as string, { data, fetchedAt: new Date() });
+    console.log(`[ZK] querydata-options: recebido ${Object.keys(data).length} campos de SN=${SN}`);
+    broadcast({ type: "device_update", sn: SN as string });
   } else {
     console.log(`[ZK] querydata unknown tablename: ${tablename}`);
   }
@@ -1154,17 +1193,21 @@ app.post("/iclock/devicecmd", async (req, res) => {
     // Return ≥ 0 = success (N records). Negatives = error codes.
     // updateMany (em vez de update) e guarda count > 0: no setup mirror, o REP envia
     // acks de comandos enfileirados pelo Soltech — esses IDs não existem aqui.
-    const upd = await prisma.command.updateMany({ where: { id: cmdId }, data: { status: ret >= 0 ? 2 : 3 } });
+    const upd = await prisma.command.updateMany({ where: { id: cmdId }, data: { status: ret >= 0 ? 2 : 3, return_code: ret } });
     if (upd.count === 0) {
       return res.type("text/plain").send("OK");
     }
-    broadcast({ type: "command_result", id: cmdId, success: ret >= 0 });
+    broadcast({ type: "command_result", id: cmdId, success: ret >= 0, return_code: ret });
 
     // Se for ack de um DATA QUERY transaction chunk histórico, enfileira o
     // próximo da fila (serialização — evita bombardear o REP).
     const cmd = await prisma.command.findUnique({ where: { id: cmdId }, select: { sn: true, command: true } });
     if (cmd?.command?.startsWith("DATA QUERY tablename=transaction") && cmd.command.includes("StartTime=")) {
       await enqueueNextHistoricChunk(cmd.sn!);
+    }
+    if (ret >= 0 && cmd?.command?.startsWith("SET OPTIONS DateTime=")) {
+      const updated = await prisma.device.update({ where: { sn: cmd.sn! }, data: { clock_synced_at: new Date() } });
+      broadcast({ type: "device_update", sn: cmd.sn!, clock_synced_at: updated.clock_synced_at?.toISOString() });
     }
 
     const photoOp = await prisma.photoOp.findFirst({ where: { command_id: cmdId } });
@@ -1199,6 +1242,44 @@ app.post("/iclock/devicecmd", async (req, res) => {
         await userOpSetFailure(userOp, `Return=${ret}`);
       }
     }
+
+    // Fase 1 (DELETE) de um upload de adpic — este ack só libera o UPDATE
+    // real, não finaliza o status do DeviceMedia (que continua "pending"
+    // até o ack do UPDATE que vamos enfileirar agora).
+    if (pendingAdpicUpdates.has(cmdId)) {
+      const payload = pendingAdpicUpdates.get(cmdId)!;
+      pendingAdpicUpdates.delete(cmdId);
+      const updateCmd = await enqueueAdpicUpdateNow(payload.sn, payload.idx, payload.buf, payload.ext);
+      await prisma.deviceMedia.updateMany({
+        where: { sn: payload.sn, idx: payload.idx, command_id: cmdId },
+        data: { command_id: updateCmd.id },
+      });
+    }
+
+    // Wallpaper (adpic) — mesma lógica de sucesso/erro do photoOp/userOp acima.
+    // Sem isso, DeviceMedia ficava marcado como aplicado mesmo quando o REP
+    // rejeitava o comando (Return=-11 visto ao vivo) — bug DEV-47.
+    const media = await prisma.deviceMedia.findFirst({ where: { command_id: cmdId } });
+    if (media) {
+      const isDeleteNotFound = ret === -2 && media.op_type === "delete";
+      if (media.op_type === "delete") {
+        if (ret >= 0 || isDeleteNotFound) {
+          // Só remove o registro quando o REP confirma (ou já não tinha nada
+          // nesse slot) — antes disso, sumia da UI otimisticamente mesmo se
+          // o REP rejeitasse o DELETE e mantivesse a imagem.
+          await prisma.deviceMedia.delete({ where: { id: media.id } });
+        } else {
+          await prisma.deviceMedia.update({ where: { id: media.id }, data: { status: "error", error_detail: `Return=${ret}` } });
+        }
+      } else {
+        if (ret >= 0) {
+          await prisma.deviceMedia.update({ where: { id: media.id }, data: { status: "success", error_detail: null } });
+        } else {
+          await prisma.deviceMedia.update({ where: { id: media.id }, data: { status: "error", error_detail: `Return=${ret}` } });
+        }
+      }
+      broadcast({ type: "device_update", sn: media.sn });
+    }
   }
 
   res.type("text/plain").send("OK");
@@ -1207,8 +1288,14 @@ app.post("/iclock/devicecmd", async (req, res) => {
 // --- API for Frontend ---
 
 app.get("/api/config", (_req, res) => {
-  const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
-  res.json({ port, read_only: READ_ONLY });
+  // ADMS_PUBLIC_PORT é a porta que o REP de fato precisa apontar (gateway
+  // externo do nginx/frontend, ex: 8080 em produção, 8090 neste setup local
+  // via docker-compose.override.yml) — NÃO é a porta interna do Express
+  // (process.env.PORT, sempre 3000 dentro do container), que era mostrada
+  // por engano no dashboard como "Porta ADMS" e confundia o valor real a
+  // configurar no aparelho.
+  const admsPort = process.env.ADMS_PUBLIC_PORT ? parseInt(process.env.ADMS_PUBLIC_PORT) : 8080;
+  res.json({ port: admsPort, read_only: READ_ONLY });
 });
 
 // Ingestão em massa de "REP visto" — alimenta o dashboard a partir do
@@ -1250,9 +1337,36 @@ app.get("/api/devices", async (_req, res) => {
   const result = devices.map((d) => ({
     ...d,
     last_seen: d.last_seen?.toISOString() ?? null,
+    clock_synced_at: d.clock_synced_at?.toISOString() ?? null,
     online: d.last_seen ? now - d.last_seen.getTime() < threshold : false,
   }));
   res.json(result);
+});
+
+// Log de comandos por REP — visibilidade do que foi enfileirado, entregue e
+// confirmado, sem precisar consultar o banco na mão. status: 0=pendente
+// (ainda não entregue via getrequest), 1=entregue (aguardando ack do REP),
+// 2=confirmado (ver return_code pro resultado real, positivo/zero=sucesso),
+// 3=erro (return_code negativo). Trunca o corpo do comando (fotos/wallpaper
+// em base64 podem ter dezenas de KB) — só o suficiente pra reconhecer o
+// comando na lista.
+app.get("/api/devices/:sn/commands", async (req, res) => {
+  const { sn } = req.params;
+  const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+  const commands = await prisma.command.findMany({
+    where: { sn },
+    orderBy: { id: "desc" },
+    take: limit,
+    select: { id: true, command: true, status: true, return_code: true, created_at: true, op_id: true },
+  });
+  res.json(commands.map((c) => ({
+    id: c.id,
+    command: (c.command ?? "").length > 120 ? c.command!.slice(0, 120) + "…" : c.command,
+    status: c.status,
+    return_code: c.return_code,
+    created_at: c.created_at.toISOString(),
+    op_id: c.op_id,
+  })));
 });
 
 // Resolve IP público → REP(s). Retorna LISTA: REPs atrás do mesmo NAT
@@ -1302,6 +1416,19 @@ app.post("/api/devices/:sn/options", express.json(), async (req, res) => {
 // locked=false → desativa, REP volta a reconhecer continuamente.
 // As chaves OpenTouchWakeUp/TouchWakeUp são proprietárias do SenseFace 7A; só
 // surtem efeito após reboot do REP, então enfileiramos CONTROL DEVICE em seguida.
+app.put("/api/devices/:sn/alias", express.json(), async (req, res) => {
+  const { sn } = req.params;
+  const alias = String(req.body?.alias ?? "").trim();
+  if (!alias) return res.status(400).json({ error: "Apelido não pode ser vazio" });
+
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+
+  await prisma.device.update({ where: { sn }, data: { alias } });
+  broadcast({ type: "device_update", sn });
+  res.json({ success: true, alias });
+});
+
 app.post("/api/devices/:sn/lock", express.json(), async (req, res) => {
   const { sn } = req.params;
   const locked = !!req.body?.locked;
@@ -1340,35 +1467,73 @@ async function optimizeForRepMedia(input: Buffer, maxKB = 200): Promise<Buffer> 
 
 const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
-// Enfileira upload de adpic com DELETE prévio do mesmo slot, garantindo
-// substituição limpa quando o REP já tem imagem no índice.
-async function enqueueAdpic(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
-  await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${index}` } });
+// IMPORTANTE — casing dos parâmetros: o PDF genérico do protocolo documenta
+// os campos de "adpic" em minúsculo (index=/size=/extension=/content=), mas
+// esse firmware (mesmo modelo que já usa PIN=/Type=/Index=/Size=/Content=
+// maiúsculo no comando BIOPHOTO) rejeita a versão minúscula com
+// Return=-11 ("Incorrect data parameter") em 100% dos testes ao vivo —
+// incluindo depois de reboot, com imagem válida, em slot novo. Confirmado
+// ao vivo em 2026-07-20: só com Index=/Size=/Extension=/Content=
+// (maiúsculo) o REP aceita (Return=0) e a imagem realmente aparece no
+// slideshow do aparelho. Ver docs/decisao-wallpaper-adpic-nao-suportado.md
+// pro histórico completo da investigação (matinha uma conclusão diferente
+// antes dessa descoberta).
+//
+// Serialização DELETE→UPDATE mantida por ainda ser uma boa prática (evita
+// os dois comandos competindo pelo mesmo arquivo no REP), mesmo não tendo
+// sido a causa raiz do Return=-11.
+const pendingAdpicUpdates = new Map<number, { sn: string; idx: number; buf: Buffer; ext: "jpg" | "png" }>();
+
+async function enqueueAdpicUpdateNow(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
   const content = buf.toString("base64");
-  const c = await prisma.command.create({
-    data: { sn, command: `DATA UPDATE adpic index=${index}\tsize=${buf.length}\textension=${ext}\tcontent=${content}` },
+  return prisma.command.create({
+    data: { sn, command: `DATA UPDATE adpic Index=${index}\tSize=${buf.length}\tExtension=${ext}\tContent=${content}` },
   });
-  return c;
+}
+
+async function enqueueAdpic(sn: string, index: number, buf: Buffer, ext: "jpg" | "png") {
+  const del = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${index}` } });
+  pendingAdpicUpdates.set(del.id, { sn, idx: index, buf, ext });
+  return del;
 }
 
 // Lista as imagens (adpics) cadastradas pra um REP. Cada item inclui um thumbnail
 // inline em base64 pra preview no dashboard sem requisição extra.
+// Mostra os 10 slots possíveis (1-10), não só os rastreados localmente —
+// adpic não tem DATA QUERY no protocolo (só push), então não temos como
+// saber o conteúdo real de um slot que nunca passou pelo dashboard (ex:
+// imagem de fábrica). Pra esses, expõe um placeholder "unknown" sem
+// thumbnail, mas com índice real — dá pra apagar mesmo sem preview, já que
+// DATA DELETE adpic Index=N funciona independente de sabermos o conteúdo.
 app.get("/api/devices/:sn/media", async (req, res) => {
   const { sn } = req.params;
   const items = await prisma.deviceMedia.findMany({
     where: { sn },
-    orderBy: { idx: "asc" },
-    select: { idx: true, size: true, ext: true, thumbnail: true, created_at: true },
+    select: { idx: true, size: true, ext: true, thumbnail: true, created_at: true, status: true, error_detail: true },
   });
-  res.json(items.map((m) => ({
-    idx: m.idx,
-    sizeKB: Math.round(m.size / 1024),
-    ext: m.ext,
-    created_at: m.created_at.toISOString(),
-    thumbnail: m.thumbnail
-      ? `data:image/jpeg;base64,${m.thumbnail.toString("base64")}`
-      : null,
-  })));
+  const byIdx = new Map(items.map((m) => [m.idx, m]));
+  const slots = [];
+  for (let idx = 1; idx <= 10; idx++) {
+    const m = byIdx.get(idx);
+    if (m) {
+      slots.push({
+        idx: m.idx,
+        sizeKB: Math.round(m.size / 1024),
+        ext: m.ext,
+        created_at: m.created_at.toISOString(),
+        thumbnail: m.thumbnail ? `data:image/jpeg;base64,${m.thumbnail.toString("base64")}` : null,
+        status: m.status,
+        error_detail: m.error_detail,
+        tracked: true,
+      });
+    } else {
+      slots.push({
+        idx, sizeKB: null, ext: null, created_at: null, thumbnail: null,
+        status: "unknown" as const, error_detail: null, tracked: false,
+      });
+    }
+  }
+  res.json(slots);
 });
 
 // Envia uma imagem nova pro slideshow do REP. Se index não vier no body,
@@ -1404,10 +1569,12 @@ app.post("/api/devices/:sn/media", mediaUpload.single("image"), async (req, res)
       .toBuffer();
 
     const c = await enqueueAdpic(sn, idx, out, ext);
+    // pending até o ack do devicecmd (Return>=0 → sent; Return<0 → error) —
+    // antes disso o registro já aparecia como aplicado incondicionalmente.
     await prisma.deviceMedia.upsert({
       where: { sn_idx: { sn, idx } },
-      create: { sn, idx, size: out.length, ext, thumbnail: thumb },
-      update: { size: out.length, ext, thumbnail: thumb, created_at: new Date() },
+      create: { sn, idx, size: out.length, ext, thumbnail: thumb, status: "pending", command_id: c.id, error_detail: null },
+      update: { size: out.length, ext, thumbnail: thumb, created_at: new Date(), status: "pending", command_id: c.id, error_detail: null },
     });
     console.log(`[ZK] media queued: cmd=${c.id} sn=${sn} idx=${idx} ext=${ext} bytes=${out.length}`);
     res.json({ success: true, commandId: c.id, idx, sizeKB: Math.round(out.length / 1024), ext });
@@ -1417,13 +1584,63 @@ app.post("/api/devices/:sn/media", mediaUpload.single("image"), async (req, res)
   }
 });
 
-// Remove uma imagem específica do REP por índice.
+// Remove uma imagem específica do REP por índice. Fica "pending" (some da UI
+// como resultado pendente, não desaparece de vez) até o ack confirmar —
+// mesmo padrão do upload, pra não mostrar como removido se o REP rejeitar.
+//
+// ?force=true: remove só do nosso registro, sem esperar confirmação do REP.
+// Dois casos de uso:
+//   1. status=error/critical — destrava imagens presas permanentemente
+//      (ex: REP rejeitando o comando sem parar).
+//   2. status=pending — cancela um upload/delete ainda em andamento (o REP
+//      pode levar tempo real pra confirmar). Nesse caso:
+//      a) Se o comando em curso ainda não foi entregue (status=0), cancela
+//         antes de sair — e se for a fase DELETE-prévia de um upload, também
+//         remove o UPDATE enfileirado (pendingAdpicUpdates), senão a imagem
+//         seria aplicada mesmo depois do usuário ter cancelado.
+//      b) Se já foi entregue (status=1, aguardando ack) não dá pra "puxar de
+//         volta" — manda um DELETE Index=X best-effort (não rastreado) pro
+//         caso a imagem já tenha sido de fato gravada no REP.
 app.delete("/api/devices/:sn/media/:idx", async (req, res) => {
   const { sn } = req.params;
   const idx = parseInt(req.params.idx);
+  const force = req.query.force === "true";
   if (!idx) return res.status(400).json({ error: "Índice inválido" });
-  await prisma.deviceMedia.deleteMany({ where: { sn, idx } });
-  const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${idx}` } });
+  const existing = await prisma.deviceMedia.findUnique({ where: { sn_idx: { sn, idx } } });
+
+  // Slot sem registro local (nunca passou pelo dashboard) — não tem status
+  // pra rastrear, então manda o delete direto (fire-and-forget) sem criar
+  // linha em device_media. adpic não tem DATA QUERY, então isso é a única
+  // forma de tentar limpar um slot cujo conteúdo não conhecemos.
+  if (!existing) {
+    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${idx}` } });
+    return res.json({ success: true, commandId: c.id, tracked: false });
+  }
+
+  if (force) {
+    if (existing.status !== "error" && existing.status !== "critical" && existing.status !== "pending") {
+      return res.status(409).json({ error: "Remoção forçada só é permitida em imagens pendentes ou com falha" });
+    }
+    if (existing.status === "pending" && existing.command_id) {
+      const cmd = await prisma.command.findUnique({ where: { id: existing.command_id } });
+      if (cmd && cmd.status === 0) {
+        await prisma.command.delete({ where: { id: cmd.id } });
+        pendingAdpicUpdates.delete(cmd.id);
+      } else {
+        // Já entregue ou em andamento — não dá pra cancelar, manda delete
+        // best-effort caso a imagem já tenha sido aplicada no REP.
+        await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${idx}` } });
+      }
+    }
+    await prisma.deviceMedia.delete({ where: { sn_idx: { sn, idx } } });
+    return res.json({ success: true, forced: true });
+  }
+
+  const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${idx}` } });
+  await prisma.deviceMedia.update({
+    where: { sn_idx: { sn, idx } },
+    data: { status: "pending", op_type: "delete", command_id: c.id, error_detail: null },
+  });
   res.json({ success: true, commandId: c.id });
 });
 
@@ -1448,19 +1665,35 @@ app.post("/api/devices/:sn/userpics/clear", async (req, res) => {
   res.json({ success: true, queued: cmds.length });
 });
 
-// Limpa todas as adpics do REP + apaga registros locais.
+// Limpa todas as adpics do REP. Cada registro existente vira "pending" e só
+// some de fato quando o ack específico daquele índice confirmar — o wildcard
+// (*) é só um atalho de melhor esforço (o firmware pode rejeitar, caso já
+// documentado), quem garante o estado real são os deletes por índice.
+//
+// Varre 1-10 mesmo pra índices sem registro local (não rastreados por nós) —
+// não tem como "listar" o que já está no REP (adpic não tem DATA QUERY no
+// protocolo, só push), mas apagar um slot vazio retorna Return=0
+// (confirmado ao vivo), então uma varredura cega é segura e pega imagens
+// pré-existentes (ex: wallpaper de fábrica) que nunca passaram pelo
+// dashboard.
 app.post("/api/devices/:sn/media/clear", async (req, res) => {
   const { sn } = req.params;
   const device = await prisma.device.findUnique({ where: { sn } });
   if (!device) return res.status(404).json({ error: "REP não encontrado" });
-  await prisma.deviceMedia.deleteMany({ where: { sn } });
-  // Wildcard + 10 índices explícitos (nem todo firmware suporta o *).
+  const existing = await prisma.deviceMedia.findMany({ where: { sn }, select: { idx: true } });
   const cmds: number[] = [];
   const wildcard = await prisma.command.create({ data: { sn, command: "DATA DELETE adpic *" } });
   cmds.push(wildcard.id);
+  const trackedIdx = new Set(existing.map((m) => m.idx));
   for (let i = 1; i <= 10; i++) {
-    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic index=${i}` } });
+    const c = await prisma.command.create({ data: { sn, command: `DATA DELETE adpic Index=${i}` } });
     cmds.push(c.id);
+    if (trackedIdx.has(i)) {
+      await prisma.deviceMedia.update({
+        where: { sn_idx: { sn, idx: i } },
+        data: { status: "pending", op_type: "delete", command_id: c.id, error_detail: null },
+      });
+    }
   }
   res.json({ success: true, queued: cmds.length });
 });
@@ -1472,6 +1705,155 @@ app.post("/api/devices/:sn/reboot", async (req, res) => {
   if (!device) return res.status(404).json({ error: "REP não encontrado" });
   try {
     const c = await enqueueRepCommand(sn, "REBOOT");
+    res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// Diagnóstico do REP — versão de firmware, capacidade, modelo. Somente leitura
+// (GET OPTIONS), sem risco de misconfigurar o aparelho. Chaves confirmadas no
+// protocolo oficial (9.5.2), testadas ao vivo.
+// MAC, UserCount, FaceCount, ~MaxFaceCount são documentados no protocolo
+// genérico mas confirmados NÃO suportados por este firmware — testado ao
+// vivo, o REP simplesmente omite esses campos da resposta (não dá erro,
+// só não retorna). Não incluir de novo sem reconfirmar noutro firmware.
+// IdleTime não entra aqui: é um valor mutável que só reflete o que foi
+// setado remotamente por nós (SET OPTIONS IdleTime=...), e diverge
+// silenciosamente se o usuário mudar algo relacionado no menu local do REP
+// — mostrar isso como "diagnóstico" dava falsa confiança sobre o estado
+// real do aparelho. Diagnóstico fica só com fatos de hardware estáveis
+// (firmware, plataforma, modelo, capacidade), que não têm esse problema.
+const DIAGNOSTIC_KEYS = "~SerialNumber,FirmVer,~DeviceName,~Platform,MachineType,~MaxUserCount,~MaxAttLogCount,~MaxFingerCount,~MaxUserFingerCount";
+
+app.post("/api/devices/:sn/diagnostics/refresh", async (req, res) => {
+  const { sn } = req.params;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  try {
+    const c = await enqueueRepCommand(sn, `GET OPTIONS ${DIAGNOSTIC_KEYS}`);
+    res.json({ success: true, commandId: c.id });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+app.get("/api/devices/:sn/diagnostics", async (req, res) => {
+  const { sn } = req.params;
+  const cached = deviceOptionsCache.get(sn);
+  if (!cached) return res.json({ data: null, fetchedAt: null });
+  res.json({ data: cached.data, fetchedAt: cached.fetchedAt.toISOString() });
+});
+
+// Fuso do horário que deve ser aplicado ao REP — não confiar no TZ do
+// sistema operacional do container (containers Docker default pra UTC a
+// menos que configurado, o que já causou um bug real: o servidor calculava
+// a hora em UTC e mandava isso pro REP como se fosse horário local).
+const APP_TIMEZONE = process.env.APP_TIMEZONE || "America/Sao_Paulo";
+
+// Retorna o offset UTC do fuso configurado no formato "+HHMM"/"-HHMM"
+// esperado pelo campo ServerTZ do protocolo ADMS.
+function getZonedOffset(d: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "shortOffset" }).formatToParts(d);
+  const tzName = parts.find((p) => p.type === "timeZoneName")?.value || "GMT+0";
+  const m = tzName.match(/GMT([+-]\d{1,2})(?::?(\d{2}))?/);
+  if (!m) return "+0000";
+  const sign = m[1].startsWith("-") ? "-" : "+";
+  const hh = String(Math.abs(parseInt(m[1]))).padStart(2, "0");
+  const mm = (m[2] || "00").padStart(2, "0");
+  return `${sign}${hh}${mm}`;
+}
+
+function getZonedOffsetMinutes(d: Date, timeZone: string): number {
+  const offset = getZonedOffset(d, timeZone);
+  const sign = offset[0] === "-" ? -1 : 1;
+  return sign * (parseInt(offset.slice(1, 3)) * 60 + parseInt(offset.slice(3, 5)));
+}
+
+// O REP manda o horário da batida em texto puro no formato local dele
+// ("YYYY-MM-DD HH:mm:ss", sem indicação de fuso) no rtlog/ATTLOG — igual ao
+// que aparece no visor físico do aparelho. `new Date(string)` sem fuso
+// explícito é interpretado no fuso do PROCESSO Node, não em APP_TIMEZONE; e
+// como o container roda em UTC, esse horário (já local) era tratado como se
+// fosse UTC — bug real visto ao vivo: REP mostra a hora certa na tela, mas o
+// registro salvo (e exibido no dashboard) sai ~3h atrasado (o fuso é
+// subtraído de novo ao converter pra exibição no navegador).
+function parseDeviceLocalTime(s: string): Date | null {
+  const m = s.trim().match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!m) return null;
+  const [y, mo, d, h, mi, se] = m.slice(1).map(Number);
+  const naiveUTC = Date.UTC(y, mo - 1, d, h, mi, se);
+  const offsetMin = getZonedOffsetMinutes(new Date(naiveUTC), APP_TIMEZONE);
+  return new Date(naiveUTC - offsetMin * 60_000);
+}
+
+// Converte data/hora pro formato de segundos usado pelo ADMS ("Security
+// PUSH Communication Protocol", Apêndice 5 - Algorithm to Convert Date to
+// Seconds), em UTC — usada tanto pro "SET OPTIONS DateTime=..." (9.5.1)
+// quanto pela resposta de GET /iclock/rtdata?type=time. Ambos os canais
+// interpretam o valor como GMT (o protocolo documenta isso explicitamente
+// pro rtdata: "DateTime: the value means a Greenwich mean time"). Mandar
+// hora LOCAL em qualquer um dos dois faz o REP aplicar o offset do
+// ServerTZ em cima de um valor que já estava ajustado — bug real já visto
+// duas vezes ao vivo: relógio da tela 3h errado (rtdata) e, depois de
+// corrigir só o rtdata, batidas de ponto carimbadas 3h atrasadas (RTC
+// interno, usado pelo SET OPTIONS DateTime).
+function encodeZktecoDateTimeUTC(d: Date): number {
+  const year = d.getUTCFullYear();
+  const mon = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  const hour = d.getUTCHours();
+  const min = d.getUTCMinutes();
+  const sec = d.getUTCSeconds();
+  return ((year - 2000) * 12 * 31 + (mon - 1) * 31 + day - 1) * (24 * 60 * 60) + (hour * 60 + min) * 60 + sec;
+}
+
+// Sincroniza o relógio do REP com o horário atual do servidor (protocolo
+// 9.5.1 Set Options — "Synchronize the time to the client": SET OPTIONS
+// DateTime=<segundos>). O ack (Return>=0 em /iclock/devicecmd) marca
+// device.clock_synced_at — não temos como ler a hora ao vivo do aparelho,
+// só confirmar que o comando foi aplicado.
+app.post("/api/devices/:sn/sync-clock", async (req, res) => {
+  const { sn } = req.params;
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  try {
+    // Mesmo bug já corrigido no /iclock/rtdata: o RTC interno do REP (usado
+    // pra carimbar os registros de ponto) também interpreta este DateTime
+    // como GMT, não hora local — mandar hora local aqui fazia o relógio da
+    // tela parecer certo (via rtdata, já em UTC) mas as batidas de ponto
+    // saírem carimbadas ~3h atrasadas (RTC ficava com o offset aplicado
+    // duas vezes). Testado ao vivo: usuário bateu ponto e o horário do
+    // registro saiu errado mesmo com o relógio da tela mostrando a hora certa.
+    const seconds = encodeZktecoDateTimeUTC(new Date());
+    const c = await enqueueRepCommand(sn, `SET OPTIONS DateTime=${seconds}`);
+    res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
+  } catch (e: any) {
+    res.status(502).json({ error: e.message });
+  }
+});
+
+// Intervalo de troca de imagem no slideshow (quanto tempo cada wallpaper
+// fica na tela antes de trocar pra próxima) — NÃO é o tempo até o REP
+// entrar em modo idle (esse ainda não foi identificado). Chave "IdleTime"
+// não está documentada no protocolo genérico (nem em nenhuma fonte pública
+// encontrada) — confirmada ao vivo por teste empírico cauteloso, um
+// comando isolado por vez, verificando que o REP continuava respondendo
+// entre cada tentativa (risco de brick documentado no projeto). Return=0
+// sozinho não bastava como prova (firmware pode aceitar chave desconhecida
+// sem fazer nada) — só foi confirmada real após observar visualmente o
+// comportamento mudar na tela do REP (o intervalo entre trocas de imagem
+// mudou; o tempo até o slideshow começar a rodar não mudou).
+app.post("/api/devices/:sn/idle-time", express.json(), async (req, res) => {
+  const { sn } = req.params;
+  const seconds = parseInt(req.body?.seconds);
+  if (!Number.isFinite(seconds) || seconds < 3 || seconds > 3600) {
+    return res.status(400).json({ error: "Tempo inválido (use entre 3 e 3600 segundos)" });
+  }
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+  try {
+    const c = await enqueueRepCommand(sn, `SET OPTIONS IdleTime=${seconds}`);
     res.json({ success: true, commandId: c.id, opId: c.opId, via: c.via });
   } catch (e: any) {
     res.status(502).json({ error: e.message });
@@ -1775,13 +2157,43 @@ async function enqueueNextHistoricChunk(sn: string) {
   console.log(`[ZK] sync-historic: enfileirado chunk ${next.start} → ${next.end} pra SN=${sn} (${queue.length} restantes)`);
 }
 
+// Gera os chunks mensais entre `from` e `to`. O primeiro chunk começa
+// EXATAMENTE em `from` (nunca arredondado pro dia 1 do mês — bug DEV-46:
+// cursor.setUTCDate(1) ignorava o dia pedido e sempre expandia o intervalo
+// pra trás até o início do mês) e o último termina exatamente em `to`. Só
+// os chunks intermediários (quando o intervalo cruza virada de mês) caem
+// em fronteiras de mês, porque é aí que a quebra precisa acontecer.
+function buildHistoricChunks(from: Date, to: Date): { start: string; end: string }[] {
+  const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
+  const cursor = new Date(from.getTime());
+  const chunks: { start: string; end: string }[] = [];
+  while (cursor < to) {
+    const start = new Date(cursor);
+    // Início do PRÓXIMO mês relativo ao cursor atual — não "cursor + 1 mês",
+    // que preservaria o dia (ex: 16/jul + 1 mês = 16/ago, pulando a
+    // fronteira real do mês em vez de parar nela).
+    const nextMonthStart = Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1);
+    cursor.setTime(nextMonthStart);
+    const end = new Date(Math.min(cursor.getTime(), to.getTime()) - 1000);
+    chunks.push({ start: fmt(start), end: fmt(end) });
+  }
+  return chunks;
+}
+
 // Sincroniza histórico de logs do REP em janelas MENSAIS SERIALIZADAS.
 // filter=* sem data trava o firmware, e enfileirar múltiplos chunks de uma
 // vez também trava. Enfileiramos só o primeiro; conforme o REP ack cada um,
 // o handler devicecmd chama enqueueNextHistoricChunk automaticamente.
 app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   const from = req.body?.from ? new Date(req.body.from) : null;
-  const to = req.body?.to ? new Date(req.body.to) : new Date();
+  // "to" enviado como data pura (YYYY-MM-DD, sem hora) significa "até o FIM
+  // desse dia", não meia-noite — senão from=to=mesmo dia vira um intervalo
+  // de zero segundos e não gera nenhum chunk, apesar do usuário claramente
+  // querer os logs daquele dia inteiro.
+  let to = req.body?.to ? new Date(req.body.to) : new Date();
+  if (typeof req.body?.to === "string" && /^\d{4}-\d{2}-\d{2}$/.test(req.body.to)) {
+    to = new Date(to.getTime() + 24 * 60 * 60 * 1000 - 1);
+  }
   const targetSn = (req.body && typeof req.body === "object" && (req.body as any).sn)
     ? String((req.body as any).sn)
     : null;
@@ -1814,16 +2226,7 @@ app.post("/api/sync-logs-historic", express.json(), async (req, res) => {
   // Fallback: fila local com chunks mensais (só funciona pra REP que aponta
   // direto pra 2.25.208.124). Formato antigo, com startTime/EndTime — o
   // SenseFace 7A às vezes trava, ver histórico do repo.
-  const fmt = (d: Date) => d.toISOString().slice(0, 19).replace("T", " ");
-  const cursor = new Date(from.getTime());
-  cursor.setUTCDate(1);
-  const chunks: { start: string; end: string }[] = [];
-  while (cursor < to) {
-    const start = new Date(cursor);
-    cursor.setUTCMonth(cursor.getUTCMonth() + 1);
-    const end = new Date(Math.min(cursor.getTime(), to.getTime()) - 1000);
-    chunks.push({ start: fmt(start), end: fmt(end) });
-  }
+  const chunks = buildHistoricChunks(from, to);
 
   let totalPlanned = 0;
   for (const dev of devices) {
