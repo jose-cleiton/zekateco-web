@@ -24,6 +24,13 @@ export const api = {
   async getDeviceByIp(ip: string): Promise<{ sn: string; ip: string; alias: string; locked: boolean; last_seen: string | null; online: boolean }[]> {
     return jsonOrThrow(await fetch(`/api/devices/by-ip/${encodeURIComponent(ip)}`));
   },
+  async updateDeviceAlias(sn: string, alias: string) {
+    return jsonOrThrow(await fetch(`/api/devices/${sn}/alias`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alias }),
+    }));
+  },
 
   async createUser(data: { pin: string; name: string; privilege?: number; password?: string; card?: string }) {
     return jsonOrThrow(await fetch("/api/users", {

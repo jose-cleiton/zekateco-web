@@ -1,4 +1,4 @@
-import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check, Image as ImageIcon, Upload, Trash2, Plus, X, Info } from "lucide-react";
+import { Hash, Cpu, Globe, Wifi, Clock, RotateCcw, RefreshCw, Loader2, Check, Image as ImageIcon, Upload, Trash2, Plus, X, Info, Pencil } from "lucide-react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import type { Device } from "../types";
@@ -112,6 +112,32 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
 
   const isSyncing = syncState === "sending" || syncState === "waiting";
 
+  const [aliasEditing, setAliasEditing] = useState(false);
+  const [aliasValue, setAliasValue] = useState(device?.alias || "");
+  const [aliasSaving, setAliasSaving] = useState(false);
+  const [aliasError, setAliasError] = useState("");
+
+  useEffect(() => {
+    if (!aliasEditing) setAliasValue(device?.alias || "");
+  }, [device?.alias, aliasEditing]);
+
+  const onSaveAlias = async () => {
+    if (!sn) return;
+    const trimmed = aliasValue.trim();
+    if (!trimmed) { setAliasError("Apelido não pode ser vazio"); return; }
+    setAliasSaving(true);
+    setAliasError("");
+    try {
+      await api.updateDeviceAlias(sn, trimmed);
+      setAliasEditing(false);
+      refresh();
+    } catch (e: any) {
+      setAliasError(e.message || "Erro ao salvar");
+    } finally {
+      setAliasSaving(false);
+    }
+  };
+
   type MediaItem = {
     idx: number; sizeKB: number | null; ext: string | null; created_at: string | null; thumbnail: string | null;
     status: "pending" | "sent" | "success" | "error" | "critical" | "unknown";
@@ -193,7 +219,41 @@ export function DispositivoScreen({ device, serverPort, refresh, readOnly = fals
       <div className="up-card p-5">
         <h3 className="text-[14px] font-semibold text-ink-900 dark:text-white mb-3">Identificação</h3>
         <SettingRow icon={Hash} label="Número de série" control={<span className="font-mono tabular text-[13px]">{device?.sn || "—"}</span>} />
-        <SettingRow icon={Cpu} label="Apelido" control={<span className="font-mono tabular text-[13px]">{device?.alias || "—"}</span>} />
+        <SettingRow icon={Cpu} label="Apelido" hint={aliasError || "Nome pra identificar onde esse REP fica"}
+          control={
+            aliasEditing ? (
+              <div className="flex items-center gap-2">
+                <input
+                  autoFocus
+                  className="border border-ink-200 dark:border-[#222A36] bg-transparent rounded-md px-2 py-1 text-[13px] font-mono w-40"
+                  value={aliasValue}
+                  onChange={(e) => setAliasValue(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") onSaveAlias();
+                    if (e.key === "Escape") { setAliasEditing(false); setAliasError(""); setAliasValue(device?.alias || ""); }
+                  }}
+                  disabled={aliasSaving}
+                />
+                <button className="btn-soft" onClick={onSaveAlias} disabled={aliasSaving}>
+                  {aliasSaving ? <Loader2 size={14} className="animate-spin" /> : <Check size={14} />}
+                </button>
+                <button className="btn-soft" onClick={() => { setAliasEditing(false); setAliasError(""); setAliasValue(device?.alias || ""); }} disabled={aliasSaving}>
+                  <X size={14} />
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <span className="font-mono tabular text-[13px]">{device?.alias || "—"}</span>
+                <button
+                  className="text-ink-400 hover:text-up-600 transition-colors"
+                  onClick={() => setAliasEditing(true)}
+                  title="Editar apelido"
+                >
+                  <Pencil size={13} />
+                </button>
+              </div>
+            )
+          } />
         <SettingRow icon={Globe} label="Endereço IP" control={<span className="font-mono tabular text-[13px]">{device?.ip || "—"}</span>} />
         <SettingRow icon={Wifi} label="Conexão"
           control={<span className={`text-[12.5px] font-medium px-2 py-0.5 rounded-full ${isOnline ? "bg-emerald-50 text-emerald-700" : "bg-ink-100 text-ink-500"}`}>{isOnline ? "Online" : "Offline"}</span>} />

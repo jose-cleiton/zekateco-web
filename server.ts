@@ -168,10 +168,10 @@ app.use((req, res, next) => {
 
 // --- Modo read-only ----------------------------------------------------------
 // READ_ONLY=1 → nenhum comando é enfileirado pro REP; escritas em /api → 501
-// (exceto mapeamentos locais de soltech-id, que não tocam o REP).
+// (exceto mapeamentos locais de soltech-id e o alias do device, que não tocam o REP).
 // READ_ONLY=0 mantém o comportamento antigo (REP direto na 8090, dev local).
 const READ_ONLY = process.env.READ_ONLY === "1";
-const READ_ONLY_ALLOW = [/^\/api\/soltech-ids$/, /^\/api\/users\/[^/]+\/soltech-id$/];
+const READ_ONLY_ALLOW = [/^\/api\/soltech-ids$/, /^\/api\/users\/[^/]+\/soltech-id$/, /^\/api\/devices\/[^/]+\/alias$/];
 app.use("/api", (req, res, next) => {
   if (!READ_ONLY || req.method === "GET") return next();
   const pathOnly = req.originalUrl.split("?")[0];
@@ -1416,6 +1416,19 @@ app.post("/api/devices/:sn/options", express.json(), async (req, res) => {
 // locked=false → desativa, REP volta a reconhecer continuamente.
 // As chaves OpenTouchWakeUp/TouchWakeUp são proprietárias do SenseFace 7A; só
 // surtem efeito após reboot do REP, então enfileiramos CONTROL DEVICE em seguida.
+app.put("/api/devices/:sn/alias", express.json(), async (req, res) => {
+  const { sn } = req.params;
+  const alias = String(req.body?.alias ?? "").trim();
+  if (!alias) return res.status(400).json({ error: "Apelido não pode ser vazio" });
+
+  const device = await prisma.device.findUnique({ where: { sn } });
+  if (!device) return res.status(404).json({ error: "REP não encontrado" });
+
+  await prisma.device.update({ where: { sn }, data: { alias } });
+  broadcast({ type: "device_update", sn });
+  res.json({ success: true, alias });
+});
+
 app.post("/api/devices/:sn/lock", express.json(), async (req, res) => {
   const { sn } = req.params;
   const locked = !!req.body?.locked;
